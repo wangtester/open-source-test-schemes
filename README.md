@@ -1,20 +1,24 @@
 # 业界顶级开源项目自动化测试方案与测试用例设计知识库
 
-> 专为构建工业级、高可靠、复杂软件系统自动化测试体系而设立的架构方案与实战用例设计知识库。深入解构 11 个业界顶级开源项目（涵盖 AI Agent、Web 自动化、云原生容器、分布式存储、富客户端 IDE、分布式工作流、API 网关、监控流管道等）的自动化测试蓝图。
+> 专为构建工业级、高可靠、复杂软件系统自动化测试体系而设立的架构方案与实战用例设计知识库。深入解构 21 个业界顶级开源项目（涵盖 AI Agent、Web 自动化、云原生容器、分布式存储、富客户端 IDE、分布式工作流、API 网关、监控流管道、复杂 Web 交互与协同画布等）的自动化测试蓝图。
 
 ---
 
 ## 目录导航
 
-- [1. 开源项目自动化测试方案全景矩阵](#1-开源项目自动化测试方案全景矩阵)
+- [1. 21 大开源项目自动化测试方案全景矩阵](#1-21-大开源项目自动化测试方案全景矩阵)
+  - [Part A: 系统级中间件、基础设施与 AI Agent 架构 (01 ~ 11)](#part-a-系统级中间件基础设施与-ai-agent-架构-01--11)
+  - [Part B: 复杂 Web 交互与高性能数据处理平台 (12 ~ 21)](#part-b-复杂-web-交互与高性能数据处理平台-12--21)
 - [2. 核心系统测试模式与设计思想沉淀](#2-核心系统测试模式与设计思想沉淀)
-- [3. 11 大开源项目深度剖析文档索引](#3-11-大开源项目深度剖析文档索引)
+- [3. 21 大开源项目深度剖析文档索引](#3-21-大开源项目深度剖析文档索引)
 - [4. 如何为复杂系统设计自动化测试方案](#4-如何为复杂系统设计自动化测试方案)
 - [5. 可复用企业级设计模板](#5-可复用企业级设计模板)
 
 ---
 
-## 1. 开源项目自动化测试方案全景矩阵
+## 1. 21 大开源项目自动化测试方案全景矩阵
+
+### Part A: 系统级中间件、基础设施与 AI Agent 架构 (01 ~ 11)
 
 | 序号 | 开源项目 | 领域 / 架构类型 | 测试框架 / 基础设施 | 核心测试模式与特色技术 | 方案文档 |
 | :---: | :--- | :--- | :--- | :--- | :---: |
@@ -32,13 +36,30 @@
 
 ---
 
+### Part B: 复杂 Web 交互与高性能数据处理平台 (12 ~ 21)
+
+| 序号 | 开源项目 | 领域 / 架构类型 | 测试框架 / 基础设施 | 核心测试模式与特色技术 | 方案文档 |
+| :---: | :--- | :--- | :--- | :--- | :---: |
+| **12** | **Discourse** | 现代大型社区论坛与协作平台 | RSpec, QUnit, Playwright, MessageBus | **富文本输入光标与异步上传占位符替换测试**、长轮询/WebSocket 订阅鉴权拦截、用户信任等级（TL）计算引擎幂等性断言 | [查看方案](schemes/12_discourse_community_web_testing_scheme.md) |
+| **13** | **Grafana** | 交互式数据监控大盘与可视化引擎 | Playwright, React Testing Library, Go Test | **网格拖拽布局碰撞检测与坐标持久化校验**、模板变量级联下钻与查询动态插值、Go 统一告警滑动窗口状态机测试 | [查看方案](schemes/13_grafana_observability_dashboard_testing_scheme.md) |
+| **14** | **Metabase** | 企业级交互式商业智能 (BI) 与数据平台 | Cypress, Clojure Test, 多数据库容器 | **无代码 Query Builder 动态 Join/聚合测试**、行级安全数据沙箱（Data Sandboxing）物理 SQL 校验、前端慢查询取消与连接回收 | [查看方案](schemes/14_metabase_bi_query_builder_testing_scheme.md) |
+| **15** | **Cal.com** | 企业级日程调度与跨时区会议预约 | Playwright, Vitest, tRPC, Prisma | **跨时区与全球夏令时（DST）槽位算法测试**、高并发防双重预订（Double Booking）竞争测试、端到端预约链路流转断言 | [查看方案](schemes/15_calcom_scheduling_timezone_testing_scheme.md) |
+| **16** | **Appwrite** | 开源后端即服务 (BaaS) 云控制台 | Swoole Client, Playwright, Docker Compose | **文档级细粒度权限信息隐匿测试 (404 Not Found)**、无服务器云函数沙箱超时硬熔断、Realtime WebSocket 广播毫秒级捕获 | [查看方案](schemes/16_appwrite_baas_console_testing_scheme.md) |
+| **17** | **Supabase Studio** | 现代 Web 数据库管理与低代码工作台 | Playwright, PostgREST, pgTAP | **虚拟化网格表格单元格就地编辑（Inline Edit）断言**、可视化 RLS 策略生成与多角色隔离验证、Postgres 内核 pgTAP 契约测试 | [查看方案](schemes/17_supabase_studio_database_management_testing_scheme.md) |
+| **18** | **NodeBB** | 高并发实时全双工社区平台 | Mocha, Socket.IO Client, Playwright | **Socket.IO 双工通知与未读红点计数器同步测试**、无限滚动（Infinite Scrolling）分页与 URL 动态同步、ACL 缓存原子失效测试 | [查看方案](schemes/18_nodebb_realtime_socket_forum_testing_scheme.md) |
+| **19** | **Directus** | 实时数据平台与 Headless CMS | Vitest, Playwright, Knex.js | **看板（Kanban）跨列拖拽与状态翻转测试**、字段级权限（FLS）键不存在断言、跨 6 种主流 SQL 数据库容器 DDL 矩阵测试 | [查看方案](schemes/19_directus_headless_cms_data_platform_testing_scheme.md) |
+| **20** | **Penpot** | 开源协同 UI/UX 设计与矢量画布平台 | Playwright, ClojureScript, WebAssembly | **无限画布绝对坐标拖拽绘制与几何运算断言**、多 BrowserContext 并发实时协同与光标跟随测试、自动布局（Auto-Layout）嵌套反向尺寸计算 | [查看方案](schemes/20_penpot_collaborative_design_canvas_testing_scheme.md) |
+| **21** | **AFFiNE** | 本地优先 (Local-First) 知识库与白板 | Playwright, Rust OctoBase, Yjs / CRDT | **富文本文档与无界白板（Edgeless）双模态转换保真度测试**、Playwright 离线断网编辑与 CRDT 冲突重连合并测试、块级拖拽重排 | [查看方案](schemes/21_affine_local_first_crdt_canvas_testing_scheme.md) |
+
+---
+
 ## 2. 核心系统测试模式与设计思想沉淀
 
-经过对上述 11 个顶级开源项目的深入解构，可提炼出以下适用于复杂软件系统的关键自动化测试模式：
+解构这 21 个顶级开源项目后，可提炼出以下适用于复杂软件系统的关键自动化测试模式：
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        复杂系统测试设计五大黄金法则                     │
+│                        复杂系统测试设计六大核心范式                     │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 1. 验证真实世界，拒绝自述日志 (Verify the world, not the self-report)   │
 │    - 任何写操作，必须穿透到底层物理文件哈希、数据库落盘行、系统进程表。│
@@ -52,15 +73,19 @@
 │ 4. 严苛的环境与进程资源隔离 (Strict Resource Sandbox & Lifecycle)      │
 │    - 每个用例专享临时目录与动态端口，无论测试成功失败必须在 teardown 彻底回收。│
 ├────────────────────────────────────────────────────────────────────────┤
-│ 5. 编译产物原生入口烟雾回归 (Built-Artifact Smokes)                    │
-│    - 必须包含针对最终打包产物（二进制/镜像）的黑盒运行验证，杜绝发布态崩溃。  │
+│ 5. 双上下文并发驱动协同验证 (Multi-Context Concurrency & Presence)    │
+│    - 针对多人协同、日历抢占，在一个用例内并发启动 2 个 BrowserContext 检验同步。│
+├────────────────────────────────────────────────────────────────────────┤
+│ 6. 真实断网仿真验证容灾与本地优先 (Network Offline Simulation)          │
+│    - 利用 setOffline(true) 验证弱网与断网编辑，恢复后检验 CRDT/增量同步收敛。 │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. 11 大开源项目深度剖析文档索引
+## 3. 21 大开源项目深度剖析文档索引
 
+### 系统与中后台架构
 1. [DeepSeek Harness：Everything is a Plugin 架构下的 Agent 执行循环与 100% 门禁测试方案](schemes/01_deepseek-harness_ai_agent_testing_scheme.md)
 2. [Microsoft Playwright：跨浏览器自动化驱动、CDP 协议与智能等待测试方案](schemes/02_playwright_browser_e2e_testing_scheme.md)
 3. [FastAPI：基于 Starlette TestClient 的内存请求驱动与 OpenAPI 契约测试方案](schemes/03_fastapi_restful_contract_testing_scheme.md)
@@ -73,16 +98,28 @@
 10. [Sentry：异步消息管道同步化驱动、事件指纹聚合与告警规则测试方案](schemes/10_sentry_event_pipeline_monitoring_testing_scheme.md)
 11. [LangChain：网络磁带录制回放、结构化解析容错与 Agent 熔断测试方案](schemes/11_langchain_rag_agent_testing_scheme.md)
 
+### 复杂 Web 交互与数据平台
+12. [Discourse：富文本编辑器光标占位符、MessageBus 实时推送与信任等级计算测试方案](schemes/12_discourse_community_web_testing_scheme.md)
+13. [Grafana：网格拖拽布局碰撞、模板变量级联下钻与告警滑动窗口测试方案](schemes/13_grafana_observability_dashboard_testing_scheme.md)
+14. [Metabase：可视化 Query Builder 多表关联、行级数据沙箱与慢查询取消测试方案](schemes/14_metabase_bi_query_builder_testing_scheme.md)
+15. [Cal.com：跨时区夏令时槽位计算、高并发双重预订拦截与预约全链路测试方案](schemes/15_calcom_scheduling_timezone_testing_scheme.md)
+16. [Appwrite：文档级细粒度权限隐匿、云函数沙箱超时硬熔断与 WebSocket 广播测试方案](schemes/16_appwrite_baas_console_testing_scheme.md)
+17. [Supabase Studio：虚拟滚动表格就地编辑、可视化 RLS 策略与 pgTAP 数据库测试方案](schemes/17_supabase_studio_database_management_testing_scheme.md)
+18. [NodeBB：Socket.IO 双工即时通知、无限滚动分页流与 ACL 缓存失效测试方案](schemes/18_nodebb_realtime_socket_forum_testing_scheme.md)
+19. [Directus：看板视图拖拽跨列、字段级权限数据掩码与 6 种数据库 DDL 矩阵测试方案](schemes/19_directus_headless_cms_data_platform_testing_scheme.md)
+20. [Penpot：矢量无限画布绝对坐标拖拽、多浏览器实时协同光标与自动布局测试方案](schemes/20_penpot_collaborative_design_canvas_testing_scheme.md)
+21. [AFFiNE：文档白板双模态切换保真度、离线断网编辑与 CRDT 冲突合并测试方案](schemes/21_affine_local_first_crdt_canvas_testing_scheme.md)
+
 ---
 
 ## 4. 如何为复杂系统设计自动化测试方案
 
-当面临一个新的复杂业务系统（如高并发电商交易系统、AI 多智能体协同平台、分布式调度引擎）时，建议按以下四步法进行方案设计：
+当面临一个新的复杂业务系统（如高并发电商交易系统、AI 多智能体协同平台、分布式调度引擎、协同画布或低代码工作台）时，建议按以下四步法进行方案设计：
 
 ```mermaid
 flowchart TD
     A["第一步：识别系统边界与架构特征<br/>(分析数据流向、异步队列、外部依赖与易崩点)"] --> B["第二步：分层选型与测试拓扑规划<br/>(确定单元层/内存驱动层/集成层/发布烟雾层)"]
-    B --> C["第三步：关键难点专项机制设计<br/>(设计网络故障注入、虚拟时钟、隔离沙箱、物理校验)"]
+    B --> C["第三步：关键难点专项机制设计<br/>(设计网络故障注入、虚拟时钟、隔离沙箱、物理校验、断网仿真)"]
     C --> D["第四步：工程化门禁与 CI/CD 落地<br/>(配置单文件覆盖率门禁、超时预算、Flaky 诊断闭环)"]
 ```
 
