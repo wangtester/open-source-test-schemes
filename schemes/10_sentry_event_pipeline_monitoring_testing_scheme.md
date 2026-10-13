@@ -1,136 +1,220 @@
-# Sentry 自动化测试方案与用例设计深度剖析
+# Sentry 自动化测试方案与事件监控管道用例全集深度剖析
 
-## 1. 项目背景与系统架构特征
+## 1. 项目背景与系统架构全景
 
-### 1.1 系统定位与技术栈
-[Sentry](https://github.com/getsentry/sentry) 是全球领先的企业级应用监控与错误日志追踪系统。系统采用 Python (Django) 作为核心业务服务，前端采用 React/TypeScript，底层利用 Apache Kafka 承载极高吞吐的事件流，利用 Celery 处理异步任务管道，并使用 Snuba (ClickHouse) 提供海量时序事件分析与聚合。
-
-### 1.2 被测系统核心组成
-1. **事件摄取管道（Relay & Ingestion Pipeline）**：接收各语言客户端 SDK 上报的异常、性能事务与指标。
-2. **数据标准化与去隐私化（Normalization & PII Scrubbing）**：清洗敏感信息（密码、API Key、信用卡号），解析堆栈。
-3. **事件聚合与指纹计算（Grouping & Fingerprinting）**：将海量不同参数但同一根因的错误事件合并为同一个 Issue。
-4. **异步队列与报警引擎（Celery Task Workers & Alert Rules）**：复杂指标计算、邮件/钉钉/Webhook 告警分发、告警静默与频率限制。
-
-### 1.3 自动化测试的主要难点与挑战
-* **重度依赖消息队列与大数据时序组件**：系统强依赖 Kafka、ClickHouse、Redis、PostgreSQL，在轻量测试环境中全部启动开销极大。
-* **异步事件处理的不可见性与时延**：客户端提交报错后，需要经历多个异步任务处理才能在数据库中查询到结果。
-* **规则引擎与数据聚合测试的分支爆炸**：不同 SDK 版本的 Payload 差异巨大，聚合算法边缘情况极多。
-
----
-
-## 2. 测试架构全景与分层策略
-
-Sentry 演进出了一套深度定制的 `sentry.testutils` 自动化测试基础设施：
+[Sentry](https://github.com/getsentry/sentry) 是全球最顶级的开源应用性能监控（APM）与分布式错误追踪平台。系统采用 Python (Django) + React (TypeScript) 构建主站，底层接入基于 Apache Kafka 的千万级吞吐事件流（Event Stream），并依托 ClickHouse / Snuba 进行超大规模分布式时序分析，配套 Rust 编写的 Symbolicator 高性能二进制符号化服务。
 
 ```
-┌────────────────────────────────────────────────────────┐
-│            End-to-End Relay Ingestion Tests            │  端到端摄取层：模拟真实 SDK 上报完整 Raw Payload
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┐
-│      Synchronous Pipeline Harness (Direct Mode)        │  管道集成层：同步执行 Kafka/Celery 消费链条，消除时延
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┐
-│       Snuba / ClickHouse Mock & Storage Tests          │  时序存储层：针对事件聚合与统计查询的轻量断言
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┐
-│         Grouping & Fingerprint Golden Tests            │  聚合纯算法层：使用海量金样（Golden Files）回归计算
-└────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        SDK Clients (Browser, Python, Go, iOS)          │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ HTTPS POST /api/{project_id}/envelope/
+┌───────────────────────────────────▼────────────────────────────────────┐
+│                    Relay Proxy (Rust 高吞吐边缘接入网关)                │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Apache Kafka 消息队列
+┌───────────────────────────────────▼────────────────────────────────────┐
+│                    Sentry Event Processing Pipeline                    │
+├───────────────────────────────┬────────────────────────────────────────┤
+│ Symbolicator (Rust 服务)      │ Snuba / ClickHouse 分布式时序存储      │
+│ - Source Maps 动态解混淆      │ - 百亿级事件秒级过滤与聚合检索         │
+│ - iOS dSYM / Android Proguard │ - 慢查询自动分片与缓存优化             │
+├───────────────────────────────┼────────────────────────────────────────┤
+│ Grouping & Fingerprint Engine │ Alert Rule & Notification Engine       │
+│ - 堆栈哈希计算与智能去重合并  │ - 滑动窗口异常率与百分位突增检测       │
+│ - 自定义指纹匹配规则          │ - Slack / PagerDuty 报警限频防抖       │
+└───────────────────────────────┴────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. 核心功能及测试用例设计剖析
+## 2. 测试架构全景与测试分类矩阵
 
-### 3.1 功能一：异步事件管道的同步化测试夹具（In-Process Execution）
+Sentry 拥有在数据管道与高可靠服务中最庞大的全套自动化测试设计：
 
-#### 3.1.1 业务功能背景
-在生产中，事件发送至 Kafka 后由后台 Worker 异步消费。如果自动化测试中每个用例都去轮询等待 Kafka 消费，不仅测试耗时成倍增加，还会因为时序波动产生 Flaky failure。
+| 测试层级 | 被测模块与用例范围 | 技术选型与执行环境 | 隔离机制与策略 |
+| :--- | :--- | :--- | :--- |
+| **Relay Ingestion Unit** | Envelope 格式解码、项目 Public Key 鉴权、速率配额限流 | Rust 原生测试 + Python Pytest | 纯内存报文解码，无网络通信 |
+| **Symbolication Tests** | Minified JS 结合 Source Map 还原到真实源码行、ELF 符号化 | Python + 独立 Symbolicator 容器 | 本地固定测试 sourcemap 夹具集 |
+| **Snuba / ClickHouse Tests** | 复杂事件 SQL 聚合、Tag 过滤、慢查询事务隔离 | Docker Compose (ClickHouse + Snuba) | 测试用例独立 ClickHouse 数据库 |
+| **Event Grouping Engine** | 堆栈框架提取、系统函数忽略、指纹计算与 Issue 合并 | Pytest (`tests/sentry/grouping`) | 基于历史真实堆栈的大规模快照回归 |
+| **Alert Rules Evaluator** | 滑动窗口错误率计算、动态基线告警、静默期防抖抑制 | Celery 异步队列同步化测试 | 模拟事件发生时间戳注入 |
+| **Web UI Dashboard E2E** | 问题详情页堆栈展开、性能火焰图（Flamegraph）查看 | Playwright / Cypress | 隔离的测试组织与虚拟事件注入 |
 
-#### 3.1.2 测试用例设计方案
-Sentry 构建了受控执行夹具，支持通过上下文管理器强制将异步队列切换为“当前线程同步立即执行”：
-* **测试用例实现**：
+---
+
+## 3. 全模块自动化用例设计与实现详解
+
+### 3.1 模块一：前端 Source Map 符号化还原（Symbolication）准确性测试
+
+#### 3.1.1 业务功能与测试目标
+生产环境的前端代码通常经过 Webpack / Vite 压缩混淆为单行 `app.min.js:1:3452`。Sentry 收到带有压缩堆栈的错误事件时，必须拉取对应的 Source Map 文件，将其还原为源文件 `src/utils/auth.ts:42` 及真实源码上下文。测试必须覆盖：
+1. 压缩行列号向原始文件与行号的精确映射。
+2. 缺失 Source Map 或 Source Map 破损时的降级处理。
+
+#### 3.1.2 测试用例实现
 ```python
+import pytest
+from sentry.models import ReleaseFile
+from sentry.lang.javascript.processor import SourceMapProcessor
 from sentry.testutils.cases import TestCase
-from sentry.testutils.helpers.task_runner import TaskRunner
 
-class EventIngestionTest(TestCase):
-    def test_event_ingestion_and_normalization(self):
-        # 1. 构造项目与测试夹具
+class SourceMapSymbolicationTest(TestCase):
+    def test_sourcemap_resolves_minified_stacktrace_to_source_code(self):
         project = self.create_project()
-        raw_event_payload = {
-            "message": "Division by zero",
-            "exception": {
-                "values": [{
-                    "type": "ZeroDivisionError",
-                    "value": "division by zero",
-                    "stacktrace": {
-                        "frames": [
-                            {"filename": "app/views.py", "lineno": 42, "function": "calculate"}
-                        ]
-                    }
-                }]
-            },
-            "user": {"email": "user@example.com", "ip_address": "127.0.0.1"}
+        release = self.create_release(project, version="v1.0.0")
+
+        # 1. 在测试数据库注入模拟的 Source Map 与压缩 JS 静态资源
+        minified_content = b"function add(a,b){return a+b}console.log(undefVar);"
+        # 对应源码: console.log(undefVar); 位于 src/index.js 第 2 行
+        sourcemap_json = b'{"version":3,"file":"min.js","sources":["src/index.js"],"mappings":"AAAA,QAASA,KAAIC,EAAEC,GAAI,MAAOD,GAAEC,EAAhBC,QAAQC,IAARC"}'
+
+        self.create_release_file(project, release, name="~/min.js", file=minified_content)
+        self.create_release_file(project, release, name="~/min.js.map", file=sourcemap_json)
+
+        # 2. 模拟前端上报的压缩堆栈帧
+        raw_frame = {
+            "abs_path": "https://example.com/min.js",
+            "filename": "min.js",
+            "lineno": 1,
+            "colno": 35,
+            "function": "add"
         }
 
-        # 2. 在 TaskRunner 作用域内提交事件：同步执行所有关联的 Celery 后台清洗任务
-        with TaskRunner():
-            event = self.process_event(raw_event_payload, project_id=project.id)
+        # 3. 执行符号化解析处理器
+        processor = SourceMapProcessor(project=project, release=release)
+        resolved_frame = processor.process_frame(raw_frame)
 
-        # 3. 断言清洗与处理结果
-        assert event is not None
-        assert event.message == "Division by zero"
-        # 断言敏感信息过滤策略（PII Scrubbing）是否生效
-        assert event.data["user"]["ip_address"] == "[ip]"
+        # 4. 严格断言：精确还原文件名、原始代码行号及上下文
+        assert resolved_frame["filename"] == "src/index.js"
+        assert resolved_frame["lineno"] == 2
+        assert "console.log" in resolved_frame.get("context_line", "")
 ```
 
 ---
 
-### 3.2 功能二：事件指纹（Fingerprinting）与 Issue 智能聚合算法测试
+### 3.2 模块二：事件指纹去重（Grouping & Fingerprinting）聚合算法测试
 
-#### 3.2.1 业务功能背景
-如果系统发生同一个错误，哪怕由于用户 ID、参数值、时间戳不同，也必须被识别并聚合成同一个 Issue，否则用户的报警看板会被刷屏。
+#### 3.2.1 业务功能与测试目标
+成千上万个并发请求抛出同一代码位置的空指针异常时，Sentry 绝不能创建上万个 Issue，必须通过计算堆栈指纹将其聚合进同一个 Issue。同时，若用户配置了自定义指纹（如 `fingerprint: ["my-custom-group"]`），算法必须遵从自定义规则。
 
-#### 3.2.2 测试用例设计方案
-* **设计原则**：使用双向对比测试（Pairwise Invariance Testing）。
-* **测试步骤**：
-  1. 上报事件 A：用户 `alice`，请求参数 `id=123`，在 `checkout()` 第 10 行抛出 `NullPointerException`。
-  2. 上报事件 B：用户 `bob`，请求参数 `id=999`，在 `checkout()` 第 10 行抛出 `NullPointerException`。
-  3. 执行聚合算法。
-  4. **硬性断言**：
-     * 断言生成的 `event_a.get_grouping_hash()` 与 `event_b.get_grouping_hash()` 完全一致。
-     * 断言数据库中仅生成了 1 个统一的 `Group`（Issue）记录，且该 Issue 的 `times_seen` 计数器为 2。
+#### 3.2.2 测试用例实现
+```python
+from sentry.grouping.api import get_grouping_calculator
+from sentry.testutils.cases import TestCase
 
----
+class EventGroupingFingerprintTest(TestCase):
+    def test_event_stacktrace_grouping_ignores_dynamic_in_app_frames(self):
+        calculator = get_grouping_calculator()
 
-### 3.3 功能三：复杂告警规则引擎（Alert Rules Engine）触发判定
+        # 构造两个发生时间不同、但根本调用栈相同的事件
+        event_a_stack = [
+            {"filename": "django/core/handlers/base.py", "function": "get_response", "in_app": False},
+            {"filename": "app/views.py", "lineno": 45, "function": "checkout", "in_app": True}
+        ]
+        event_b_stack = [
+            {"filename": "django/core/handlers/base.py", "function": "get_response", "in_app": False},
+            {"filename": "app/views.py", "lineno": 45, "function": "checkout", "in_app": True}
+        ]
 
-#### 3.3.1 业务功能背景
-当且仅当“在过去 5 分钟内错误频率大于 100 次，且受影响用户数大于 10 人”时，才触发 P0 级 Webhook 告警通知。
+        # 1. 计算两个事件的聚合哈希指纹
+        hash_a = calculator.calculate_grouping_hash({"stacktrace": {"frames": event_a_stack}})
+        hash_b = calculator.calculate_grouping_hash({"stacktrace": {"frames": event_b_stack}})
 
-#### 3.3.2 测试用例设计方案
-* **测试步骤**：
-  1. 配置警报规则：设置阈值和触发动作。
-  2. 模拟事件序列注入：通过循环连续注入 99 个事件，运行规则引擎，断言触发动作为空（未达阈值）。
-  3. 注入第 100 个事件，断言规则触发，生成一条待派发通知记录。
-  4. 紧接着再注入 50 个事件，断言进入“告警静默抑制期（Snooze/Cool-down）”，不产生重复通知风暴。
-
----
-
-## 4. 自动化测试基础设施与 CI 质量保障
-
-1. **Snuba / ClickHouse 本地轻量化模拟**：
-   * 开发专有的 `SnubaTest` 基类，在测试启动时自动建立临时内存表或隔离数据集，在每次用例结束后通过截断（TRUNCATE）指令高速复位数据。
-2. **多语言 SDK 跨仓库集成回归**：
-   * 建立专门的 Integration Testbed，由主流语言 SDK（Python, JavaScript, Java, Go）在夜间构建中向上游 Sentry Server 上报真实错误，自动化核验兼容性。
+        # 2. 强断言：指纹完全相同，必须被聚合
+        assert hash_a == hash_b
+        assert len(hash_a) == 32 # MD5 长度校验
+```
 
 ---
 
-## 5. 对复杂系统自动化测试设计的实战借鉴意义
+### 3.3 模块三：Snuba / ClickHouse 分布式时序查询与慢聚合测试
 
-* **异步消息流系统必须支持“同步测试模式”**：在设计消息驱动架构时，底层消费派发器必须预留直接同步执行的能力（如 In-memory / Direct Runner），才能让核心业务管道测试保持极速、确定和可调试。
-* **核心聚合/归类算法依赖“金样测试集（Golden Dataset）”**：对于文本挖掘、错误聚合、智能分类等算法，收集典型的生产样本作为回归金样，在算法重构时逐一比对哈希，能完全杜绝分类退化。
-* **必须在测试中验证“抑制与去重机制”**：监控、告警、通知类系统，测试的核心往往不在于“能否发得出去”，而在于“在风暴来临时能否成功抑制和去重”。
+#### 3.3.1 业务功能与测试目标
+验证针对近 24 小时上亿级事件进行 `count() by transaction, project_id` 的查询逻辑，在 ClickHouse 分区表上能够稳定生成合规 SQL，并在超时时间内返回结构化聚合指标。
+
+#### 3.3.2 测试用例实现
+```python
+from sentry.snuba.dataset import Dataset
+from sentry.utils.snuba import raw_snql_query
+from sentry.testutils.cases import SnubaTestCase
+
+class SnubaAggregationQueryTest(SnubaTestCase):
+    def test_snuba_aggregates_transaction_percentiles(self):
+        project = self.create_project()
+
+        # 1. 向受测 ClickHouse 写入测试性能指标事件
+        self.store_performance_event(project_id=project.id, transaction="/api/pay", duration=120)
+        self.store_performance_event(project_id=project.id, transaction="/api/pay", duration=450)
+        self.store_performance_event(project_id=project.id, transaction="/api/pay", duration=80)
+
+        # 2. 构造聚合查询：计算 P95 耗时与总调用量
+        query = {
+            "dataset": Dataset.Transactions,
+            "selected_columns": ["transaction", "p95(duration)", "count()"],
+            "groupby": ["transaction"],
+            "filter_keys": {"project_id": [project.id]}
+        }
+
+        # 3. 执行查询并验证返回数据
+        result = raw_snql_query(query)
+        data = result["data"]
+        assert len(data) == 1
+        assert data[0]["transaction"] == "/api/pay"
+        assert data[0]["count"] == 3
+        assert data[0]["p95_duration"] >= 400
+```
+
+---
+
+### 3.4 模块四：Playwright 问题详情页交互与火焰图渲染 E2E 测试
+
+#### 3.4.1 业务功能与测试目标
+驱动浏览器访问 Sentry Issue Details 界面：
+1. 校验异常概要气泡、标签（Tags）列表展示。
+2. 展开完整的调用栈（Stacktrace），验证高亮显示属于本应用（In App）的代码行。
+3. 切换到“Tags”选项卡，验证浏览器、操作系统分布饼图渲染。
+
+#### 3.4.2 测试用例实现
+```typescript
+import { test, expect } from '@playwright/test';
+
+test.describe('Sentry Issue Details & Flamegraph E2E', () => {
+  test('User views issue details, expands stacktrace and inspects tags', async ({ page }) => {
+    await page.goto('http://localhost:8000/organizations/sentry-org/issues/1001/');
+
+    // 1. 验证错误标题与状态展示
+    const issueTitle = page.locator('[data-test-id="issue-title"]');
+    await expect(issueTitle).toContainText('ZeroDivisionError: division by zero');
+
+    // 2. 点击展开堆栈帧中的原始源码上下文
+    const stackFrame = page.locator('.trace-frame:has-text("views.py")').first();
+    await expect(stackFrame).toBeVisible();
+    await stackFrame.click();
+
+    // 3. 验证源码上下文展开展示对应行号与代码高亮
+    const codeContext = stackFrame.locator('.frame-code');
+    await expect(codeContext).toBeVisible();
+    await expect(codeContext).toContainText('result = 1 / 0');
+
+    // 4. 切换至 Tags 标签页
+    await page.click('button:has-text("Tags")');
+    await expect(page.locator('[data-test-id="tag-browser"]')).toContainText('Chrome');
+  });
+});
+```
+
+---
+
+## 4. 测试工程化与基础设施
+
+1. **Kafka 内存通道模拟与同步消费**：
+   * 在 Pytest 中，通过自定义 Producer/Consumer 内存驱动，拦截所有发往 Kafka 的事件，直接同步灌入 Snuba 存储层，单条端到端用例反馈时间压缩在 50ms 之内。
+2. **多租户数据清理隔离**：
+   * 使用 `sentry.testutils.cases.TestCase` 自动生成随机 Organization 与 Project ID，并在用例 teardown 阶段批量删除所有关联数据。
+
+---
+
+## 5. 对同类复杂系统的参考价值
+
+* **事件驱动分布式架构的测试闭环**：对于“网关接收 -> 消息队列 -> 异步符号化 -> 分布式存储”的长链路系统，自动化测试必须做到各层独立可测（Mock 下游），同时在集成阶段以轻量受控容器进行全链路连通性穿刺验证。
