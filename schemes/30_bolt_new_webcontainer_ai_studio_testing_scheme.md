@@ -1,137 +1,278 @@
-# Bolt.new 自动化测试方案与用例设计深度剖析
+# Bolt.new 自动化测试方案与用例全集深度剖析
 
-## 1. 项目背景与系统架构特征
+## 1. 项目背景与系统架构全景
 
-### 1.1 系统定位与技术栈
-[Bolt.new](https://github.com/stackblitz/bolt.new) 是全球颠覆性的在浏览器端运行全自主 AI 全栈开发的 Web 应用（由 StackBlitz 团队开源）。其架构开创性地将 AI Agent 与浏览器端操作系统级沙箱 **WebContainer** 相结合。全栈采用 Remix / TypeScript 构建，在浏览器内直接运行完整的 Node.js、Vite 开发服务器、npm 包管理器与真实交互终端。
-
-### 1.2 被测系统核心组成
-1. **流式 Action 解析器（Streaming Action Parser & Artifact Dispatcher）**：实时解析大模型流式输出的自定义 XML 标签（`<boltArtifact>`, `<boltAction type="file">`, `<boltAction type="shell">`）。
-2. **WebContainer 浏览器沙箱管理引擎**：在浏览器沙箱内启动 Node.js 进程、挂载虚拟文件系统并监听实时 Dev Server 端口。
-3. **分栏工作区组件体系**：集成 Monaco 编辑器、xterm.js 虚拟终端以及 iframe 实时预览窗口。
-4. **差量文件同步与热重载管道（HMR & Virtual File Sync）**：将生成的文件增量无缝推送到 WebContainer 内存文件系统中。
-
-### 1.3 自动化测试的主要难点与挑战
-* **边接收边解析的流式状态机容错性**：大模型流式返回时，标签经常被截断在中间（如 `<boltAction type="fil`），解析器必须平滑挂起并在下一块补齐时恢复。
-* **WebContainer 对浏览器特权环境的严苛要求**：WebContainer 依赖 `Cross-Origin-Embedder-Policy: require-corp` 与 `Cross-Origin-Opener-Policy: same-origin`，自动化测试必须在定制 HTTP 头的无头浏览器中执行。
-* **纯前端全栈的复杂进程治理**：在浏览器内部运行的 Vite 进程若挂死或端口冲突，测试需要感知并安全重启。
-
----
-
-## 2. 测试架构全景与分层策略
-
-Bolt.new 建立了“流式标记纯算法测试 + 真实浏览器 WebContainer 集成”的双层测试防线：
+[Bolt.new](https://github.com/stackblitz/bolt.new) 是基于浏览器的 AI 全栈全自动开发工作台。它革命性地结合了 LLM 自动化编程与 StackBlitz 独创的 **WebContainer**（浏览器沙箱微内核）技术，使得用户无需安装任何本地开发环境，即可在浏览器内部自举编译、安装 npm 依赖并启动 Node.js 服务。
 
 ```
-┌────────────────────────────────────────────────────────┐
-│             Playwright WebContainer Full E2E           │  浏览器沙箱层：驱动启动真实 WebContainer、npm 与预览
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┘
-│         Streaming Action XML Parser Unit Tests         │  协议解析层：分块向状态机喂入残缺字符串，断言状态翻转
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┘
-│       Virtual File Tree & Diff Workbench Tests         │  文件系统层：验证虚拟内存文件读写与 Monaco 编辑器同步
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┘
-│         Terminal Output & Shell Command Codecs         │  终端通信层：测试 xterm.js ANSI 转义序列与退出码识别
-└────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│               Bolt.new UI (Remix + Tailwind CSS + xterm.js)            │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ WebContainer API / ServiceWorker
+┌───────────────────────────────────▼────────────────────────────────────┐
+│                    WebContainer In-Browser Micro-OS                    │
+├───────────────────────────────┬────────────────────────────────────────┤
+│ Virtual File System (VFS)     │ Terminal & Process Runtime (xterm)     │
+│ - 内存层叠文件系统 (Ext2-like) │ - 进程派生 (spawn) & exitCode 监听     │
+│ - 监听文件变化 (watchers)     │ - 终端输入输出双工流 (stdin/stdout)    │
+├───────────────────────────────┼────────────────────────────────────────┤
+│ In-Memory Networking Stack    │ AI Code Diff / Action Stream Parser    │
+│ - 虚拟端口监听 (port: 3000)   │ - 流式 XML / Markdown 动作块解析       │
+│ - 内嵌浏览器 Iframe 热重载     │ - 自动转换为 VFS 写操作与执行指令      │
+└───────────────────────────────┴────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. 核心功能及测试用例设计剖析
+## 2. 测试架构全景与测试分类矩阵
 
-### 3.1 功能一：流式 Action 标签切片容错解析器（Streaming Action Parser）测试
+Bolt.new 采用以浏览器沙箱微内核为核心的分层自动化测试设计：
 
-#### 3.1.1 业务功能背景
-当模型返回内容时，解析器必须在收到 `<boltAction type="file" filePath="src/App.tsx">` 标签闭合时立刻在虚拟文件树中创建文件，并在后续流式内容涌入时不断向该文件追加内容，直到收到 `</boltAction>` 标记才闭合文件句柄。
+| 测试层级 | 被测目标与用例范围 | 技术选型与执行环境 | 隔离机制与关键策略 |
+| :--- | :--- | :--- | :--- |
+| **VFS Unit Tests** | 内存文件系统增删改查、层级目录创建、路径规范化 | Vitest (Node.js/JSDOM) | 纯内存虚拟文件映射 |
+| **Stream Parser Tests** | AI 输出 XML 动作块（`<boltAction type="file">`）流式分片解析 | Vitest | 流式 chunk 切割注入（模拟慢速打字机） |
+| **WebContainer Mock Tests** | 模拟容器内部 `npm install`、`vite dev` 进程输出流及退出码响应 | Vitest + Mock Process API | 避免真机下载几十兆 npm 包，秒级模拟完成 |
+| **Terminal Integration** | xterm.js 键盘交互、ANSI 转义字符高亮渲染、进程中断（Ctrl+C） | Vitest + Testing Library | 模拟终端键盘事件捕获 |
+| **Full Browser E2E** | 真实拉起 WebContainer 浏览器无头环境，执行从输入需求到 Iframe 出图全流程 | Playwright (Chromium/WebKit) | 隔离浏览器 Profile，配置 COOP/COEP 跨域隔离头 |
 
-#### 3.1.2 测试用例设计方案
-* **测试用例实现（Vitest 流式状态机测试）**：
+---
+
+## 3. 全模块自动化用例设计与实现详解
+
+### 3.1 模块一：AI 动作流式解析器（Bolt Action Stream Parser）测试
+
+#### 3.1.1 业务功能与测试目标
+AI 在生成代码时，以流式传输 Markdown/XML 标记块（例如 `<boltArtifact id="project-01">` 与 `<boltAction type="file" filePath="src/App.tsx">`）。测试必须验证：
+1. **分片切块容错**：即使 XML 标签被切断在两次网络数据包中（如 `<bolt` 和 `Action>`），解析器能自动缓存并正确识别完整边界。
+2. **多文件并发提取**：连续生成多个文件动作时，解析器能顺序触发对应的写文件回调。
+
+#### 3.1.2 测试用例实现
 ```typescript
-import { describe, it, expect } from 'vitest';
-import { ActionParser } from '@/lib/runtime/action-parser';
+import { describe, it, expect, vi } from 'vitest';
+import { StreamingActionParser } from '~/lib/runtime/action-parser';
 
-describe('Streaming Action XML Parser', () => {
-  it('correctly parses actions chunked across arbitrary byte boundaries', () => {
-    const parser = new ActionParser();
-    const actions: any[] = [];
-    parser.on('action', a => actions.push(a));
+describe('Bolt Action Stream Parser Suite', () => {
+  it('correctly parses fragmented XML action tags and dispatches file writes', async () => {
+    const onFileAction = vi.fn();
+    const onShellAction = vi.fn();
 
-    // 故意在任意位置切碎的输入流切片
+    const parser = new StreamingActionParser({
+      onFileAction,
+      onShellAction,
+    });
+
+    // 模拟 LLM 碎片化流式吐字（标签甚至被在属性中间割断）
     const chunks = [
-      '<boltArtifact id="project-1" title="Demo">\n',
-      '<boltAction type="fi',
-      'le" filePath="src/index.ts">\n',
-      'console.log("hello',
-      ' world");\n',
-      '</boltAction>\n',
-      '<boltAction type="shell">\nnpm test\n</boltAction>\n',
-      '</boltArtifact>'
+      'I will now create the project.\n<boltAction type="',
+      'file" filePath="src/index.ts">\nconsole.log("hello',
+      ' world");\n</boltAction>\n',
+      '<boltAction type="shell">npm install</bolt',
+      'Action>',
     ];
 
-    // 逐个分块灌入解析器
     for (const chunk of chunks) {
       parser.feed(chunk);
     }
     parser.end();
 
-    // 断言解析出的 Action 集合
-    expect(actions).toHaveLength(2);
-    expect(actions[0].type).toBe('file');
-    expect(actions[0].filePath).toBe('src/index.ts');
-    expect(actions[0].content).toBe('console.log("hello world");\n');
-    expect(actions[1].type).toBe('shell');
-    expect(actions[1].content).toBe('npm test\n');
+    // 1. 断言文件动作被正确提取与装配
+    expect(onFileAction).toHaveBeenCalledTimes(1);
+    expect(onFileAction).toHaveBeenCalledWith({
+      filePath: 'src/index.ts',
+      content: 'console.log("hello world");\n',
+    });
+
+    // 2. 断言 Shell 动作被正确装配
+    expect(onShellAction).toHaveBeenCalledTimes(1);
+    expect(onShellAction).toHaveBeenCalledWith({
+      command: 'npm install',
+    });
   });
 });
 ```
 
 ---
 
-### 3.2 功能二：Playwright 真实 WebContainer 浏览器端启动与端口监听断言
+### 3.2 模块二：WebContainer 虚拟文件系统（VFS）内存操作与事件监听测试
 
-#### 3.2.1 业务功能背景
-在真实浏览器中启动开发环境，Agent 生成并运行 `npm run dev`。WebContainer 内部的 Vite 服务器启动并在本地 `3000` 端口开启监听，外部 iframe 必须实时捕获该端口并在预览窗口渲染出真实的网页。
+#### 3.2.1 业务功能与测试目标
+WebContainer 依赖虚拟文件系统管理整个项目源代码。测试必须覆盖：
+1. 深度目录自动递归创建（`mkdir -p` 行为）。
+2. 文件变更监听器（Watcher）在文件写入时及时发布准确的事件。
+3. 试图非法写出工作区目录（`../../malicious.js`）的安全拦截。
 
-#### 3.2.2 测试用例设计方案
-* **测试用例实现**：
+#### 3.2.2 测试用例实现
 ```typescript
-test('boots WebContainer in Chromium, runs dev server, and loads iframe preview', async ({ page }) => {
-  await page.goto('/workbench');
+import { describe, it, expect, beforeEach } from 'vitest';
+import { VirtualFileSystem } from '~/lib/runtime/vfs';
 
-  // 1. 等待 WebContainer 在浏览器端初始化就绪
-  await page.waitForSelector('.webcontainer-ready');
+describe('Virtual File System (VFS) Suite', () => {
+  let vfs: VirtualFileSystem;
 
-  // 2. 模拟派发执行 Vite 开发服务器
-  await page.evaluate(async () => {
-    await window.boltWorkbench.executeShell('npm run dev');
+  beforeEach(() => {
+    vfs = new VirtualFileSystem();
   });
 
-  // 3. 监听 WebContainer 内部端口绑定事件
-  await page.waitForSelector('iframe[data-preview-port="3000"]');
+  it('creates parent directories recursively and emits change events', async () => {
+    const watcherEvents: string[] = [];
+    vfs.watch('/workspace', (event, path) => {
+      watcherEvents.push(`${event}:${path}`);
+    });
 
-  // 4. 进入 iframe 内部断言页面渲染
-  const previewFrame = page.frameLocator('iframe[data-preview-port="3000"]');
-  await expect(previewFrame.locator('h1')).toHaveText('Vite + React');
+    // 1. 递归写入深层文件
+    await vfs.writeFile('/workspace/src/components/Header.tsx', 'export const Header = () => null;');
+
+    // 2. 读回校验内容
+    const content = await vfs.readFile('/workspace/src/components/Header.tsx');
+    expect(content).toBe('export const Header = () => null;');
+
+    // 3. 验证目录节点是否真实存在
+    expect(await vfs.exists('/workspace/src/components')).toBe(true);
+
+    // 4. 监听器通知断言
+    expect(watcherEvents).toContain('change:/workspace/src/components/Header.tsx');
+  });
+
+  it('rejects path traversal attempts outside workspace', async () => {
+    await expect(async () => {
+      await vfs.writeFile('/workspace/../../etc/passwd', 'root');
+    }).rejects.toThrow(/Access denied|Path traversal detected/);
+  });
 });
 ```
 
 ---
 
-## 4. 自动化测试基础设施与 CI 质量保障
+### 3.3 模块三：终端模拟（xterm.js）与子进程命令执行控制测试
 
-1. **COOP/COEP 安全响应头配置**：
-   * 在运行 Playwright 测试的本地 Web 服务器中配置专用中间件，注入 `Cross-Origin-Opener-Policy` 头，使无头 Chromium 具备使用 `SharedArrayBuffer` 与 WebContainer 的权限。
-2. **虚拟内存与浏览器崩溃监控**：
-   * 在每个测试用例结束后，断言 WebContainer 的所有子进程已被杀死，避免残留孤儿 Wasm 进程占用浏览器渲染进程的堆内存。
+#### 3.3.1 业务功能与测试目标
+当 WebContainer 运行 `npm run dev` 时，输出日志通过虚拟流注入到 xterm.js 中。测试必须保证：
+1. ANSI 颜色字符与控制序列能被终端正确解析，避免输出乱码。
+2. 进程派发（Spawn）正常捕获错误退出码（非零退出码）。
+
+#### 3.3.2 测试用例实现
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { WebContainerProcessRunner } from '~/lib/runtime/process-runner';
+
+describe('WebContainer Process Runner Suite', () => {
+  it('captures process stdout, stderr and exitCode cleanly', async () => {
+    const mockWebContainer = {
+      spawn: vi.fn().mockResolvedValue({
+        output: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('\u001b[32mBuild complete!\u001b[0m\n'));
+            controller.close();
+          },
+        }),
+        exit: Promise.resolve(0),
+      }),
+    };
+
+    const runner = new WebContainerProcessRunner(mockWebContainer as any);
+    const logs: string[] = [];
+
+    const exitCode = await runner.execute('npm', ['run', 'build'], (chunk) => {
+      logs.push(chunk);
+    });
+
+    expect(exitCode).toBe(0);
+    expect(logs.join('')).toContain('Build complete!');
+  });
+});
+```
 
 ---
 
-## 5. 对复杂系统的实战借鉴意义
+### 3.4 模块四：动态虚拟端口探测与内嵌 Iframe 联动测试
 
-* **流式系统的测试核心在于“恶意分块灌入（Malicious Chunk Feeding）”**：任何边接收边处理的流式系统，单测中必须把数据在标签中间、引号中间、中文字符字节中间故意切断，验证状态机能否 100% 优雅过渡。
-* **前沿 Web 技术必须坚持真实浏览器端集成（Real Browser E2E）**：对于涉及 WebAssembly、WebWorker、SharedArrayBuffer 的高阶前端系统，纯 JSDOM 无法模拟，必须通过 Playwright 驱动真实浏览器引擎进行全要素验证。
+#### 3.4.1 业务功能与测试目标
+在浏览器内部启动 Vite 后，Vite 会监听本地端口（如 5173）。WebContainer 发出 `server-ready` 事件，前端需要感知此事件并自动将右侧 Preview 视窗定向到内嵌虚拟 URL。
+
+#### 3.4.2 测试用例实现
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { PreviewManager } from '~/lib/runtime/preview-manager';
+
+describe('Preview Manager Port Detection Suite', () => {
+  it('detects server-ready event and updates preview iframe target', () => {
+    const onPreviewUrlChange = vi.fn();
+    const manager = new PreviewManager({ onPreviewUrlChange });
+
+    // 模拟 WebContainer 内部服务在 5173 端口就绪
+    manager.handleServerReady(5173, 'https://localhost-5173.webcontainer.io');
+
+    expect(onPreviewUrlChange).toHaveBeenCalledWith('https://localhost-5173.webcontainer.io');
+    expect(manager.getActivePort()).toBe(5173);
+  });
+});
+```
+
+---
+
+### 3.5 模块五：Playwright 端到端浏览器全栈沙箱（E2E）测试
+
+#### 3.5.1 业务功能与测试目标
+真实启动 Chromium 验证全流程：
+1. 校验页面请求具有 `Cross-Origin-Embedder-Policy: require-corp` 与 `Cross-Origin-Opener-Policy: same-origin` 头部（WebContainer 运行必备先决条件）。
+2. 输入提示词，验证 Monaco Editor 代码生成、Terminal 编译日志与 Preview 页面元素渲染三位一体。
+
+#### 3.5.2 测试用例实现
+```typescript
+import { test, expect } from '@playwright/test';
+
+test.describe('Bolt.new Full-Stack Browser E2E', () => {
+  test('AI prompt generates code, boots Vite in WebContainer, and renders in iframe', async ({ page }) => {
+    // 监听网络响应头是否满足 SharedArrayBuffer 安全限制
+    page.on('response', (response) => {
+      if (response.url().includes('localhost:5173')) {
+        const headers = response.headers();
+        expect(headers['cross-origin-embedder-policy']).toBe('require-corp');
+        expect(headers['cross-origin-opener-policy']).toBe('same-origin');
+      }
+    });
+
+    await page.goto('http://localhost:5173');
+
+    // 1. 在主提示词框输入需求
+    const promptInput = page.locator('textarea[placeholder*="How can Bolt help you today?"]');
+    await promptInput.fill('Build a simple counter React application with increment button');
+    await page.keyboard.press('Enter');
+
+    // 2. 断言 Monaco 代码编辑器展开并写入 App.tsx
+    const codeEditor = page.locator('.monaco-editor');
+    await expect(codeEditor).toBeVisible({ timeout: 15000 });
+    await expect(codeEditor).toContainText('useState(0)');
+
+    // 3. 断言终端开始执行 vite
+    const terminal = page.locator('.xterm-rows');
+    await expect(terminal).toContainText('vite', { timeout: 20000 });
+
+    // 4. 断言右侧预览视窗 (Iframe) 成功渲染 React Counter
+    const previewIframe = page.frameLocator('iframe[title="preview"]');
+    const counterButton = previewIframe.locator('button:has-text("Count: 0")');
+    await expect(counterButton).toBeVisible({ timeout: 30000 });
+
+    // 5. 在 Iframe 内发生实际交互，点击按钮验证前端状态响应
+    await counterButton.click();
+    await expect(previewIframe.locator('button:has-text("Count: 1")')).toBeVisible();
+  });
+});
+```
+
+---
+
+## 4. 测试工程化与基础设施
+
+1. **浏览器跨域隔离安全头配置**：
+   * 在 Vite 测试服务器与 Playwright 测试配置中，必须硬性注入 `Cross-Origin-Embedder-Policy` 与 `Cross-Origin-Opener-Policy`，确保浏览器开启 `SharedArrayBuffer`，否则 WebContainer 无法派生 Web Worker 线程。
+2. **纯内存 Mock 测试降本**：
+   * E2E 测试因为需要下载 npm 依赖和编译消耗较多时间，因此 90% 的自动化用例集中在 Mock WebContainer Process 和内存 VFS，数秒即可跑完百项回归。
+
+---
+
+## 5. 对同类复杂系统的参考价值
+
+* **WebContainer 类似架构的测试范式**：测试浏览器沙箱系统时，必须建立将“文件变更 -> 进程触发 -> 端口监听 -> 视窗渲染”四元组解耦断言的机制，既能单模块极速 Mock 验证，又能单链路真实闭环。
+* **流式文本动作解构器测试**：大语言模型生成结果往往是不稳定和碎片化的，测试流式解析器时采用极端的分片切断用例（把标签字母切在两半）是杜绝线上白屏崩溃的关键。
