@@ -1,178 +1,240 @@
-# Cal.com 自动化测试方案与用例设计深度剖析
+# Cal.com 自动化测试方案与用例全集深度剖析
 
-## 1. 项目背景与系统架构特征
+## 1. 项目背景与系统架构全景
 
-### 1.1 系统定位与技术栈
-[Cal.com](https://github.com/calcom/cal.com) 是全球领先的企业级开源会议预约与日程调度 Web 平台（Calendly 开源替代品）。系统基于全栈 TypeScript 构建，采用 Next.js (App Router)、React、tRPC（端到端强类型 RPC）、Prisma ORM 以及 PostgreSQL。
-
-### 1.2 被测系统核心组成
-1. **可用性与时间槽位引擎（Availability & Slot Computation）**：根据发起人配置的工作时间段、已有日历忙闲状态、跨时区转换及缓冲时间（Buffer time）动态计算空闲预约槽位。
-2. **多源第三方日历同步（Calendar Integrations）**：双向实时同步 Google Calendar、Outlook、Apple Calendar 等日历事件。
-3. **高并发抢占与防双重预订（Double Booking Prevention & Concurrency Control）**：保证在极端并发场景下，同一个预约时间段绝对不会被两个用户同时预订。
-4. **自定义表单、支付与动态路由（Dynamic Booking Form & Stripe Billing）**：收集参会人问卷、收取预约押金、动态根据回答路由到不同主持人。
-
-### 1.3 自动化测试的主要难点与挑战
-* **全球夏令时/冬令时（DST）与跨时区转换的边缘陷阱**：预约发起人与参会人处于不同大洲，且处于夏令时交替日（如每年 3 月和 11 月）时的时间计算。
-* **高并发预约抢占竞态（Race Condition）**：毫秒内两名用户在网页端同时点击同一个 10:00-10:30 槽位。
-* **复杂的第三方 OAuth 与日历 API 依赖**：如何在离线测试中可靠模拟 Google/Outlook 日历繁忙事件的双向拉取与推送。
-
----
-
-## 2. 测试架构全景与分层策略
-
-Cal.com 建立了类型安全（Type-Safe）与行为驱动相结合的端到端测试防线：
+[Cal.com](https://github.com/calcom/cal.com) 是全球领先的企业级日程预约调度基础设施平台。前端基于 Next.js + React + Tailwind CSS，后端依托 Next.js API Routes + Prisma ORM + PostgreSQL 构建高可靠性调度引擎。系统核心复杂度在于**多参与者跨时区空闲计算（Availability Calculation）、夏令时切换补偿、第三方日历双向同步（Google/Outlook）以及 Webhook 回调幂等控制**。
 
 ```
-┌────────────────────────────────────────────────────────┐
-│             Playwright End-to-End User Journeys        │  端到端交互层：驱动日历组件选择槽位、填写表单并提交
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┐
-│      tRPC Router & Middleware Integration Tests        │  业务接口层：端到端类型校验、鉴权拦截与错误码断言
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┐
-│         Slots & Timezone Calculation Core Tests        │  时区计算层：基于纯数学与日期库穷尽跨时区槽位矩阵
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┘
-│         Isolated PostgreSQL Prisma Test Database       │  数据持久层：利用事务回滚保持每个测试用例状态纯净
-└────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│             Cal.com Booking Flow (Next.js App Router)                  │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ TRPC / Server Actions
+┌───────────────────────────────────▼────────────────────────────────────┐
+│                    Cal.com Core Engine (Node.js/Prisma)                │
+├───────────────────────────────┬────────────────────────────────────────┤
+│ Availability Schedule Engine  │ Timezone & DST Offset Resolver         │
+│ - 用户工作时间区间求交集      │ - 协调世界时 (UTC) 与本地时区双向换算   │
+│ - 已预约时间块占位剔除        │ - 跨夏令时/冬令时边界时间段补偿         │
+├───────────────────────────────┼────────────────────────────────────────┤
+│ Calendar Sync Adapter Bus     │ Webhook & Idempotency Pipeline         │
+│ - Google / Outlook / Apple    │ - 签名计算与安全校验                   │
+│ - 增量同步与网络异常重试      │ - 重复回调防抖与数据库唯一事务约束     │
+└───────────────────────────────┴────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. 核心功能及测试用例设计剖析
+## 2. 测试架构全景与测试分类矩阵
 
-### 3.1 功能一：跨时区与夏令时交替（DST）时间槽位精准计算
+Cal.com 构建了覆盖时区数学边界、外部第三方日历集成与端到端预约的测试全矩阵：
 
-#### 3.1.1 业务功能背景
-发起人在“亚洲/东京”（UTC+9）设置工作时间为周一 09:00 - 17:00；参会人在“美洲/纽约”（UTC-5，夏令时期间为 UTC-4）打开预约网页。系统必须在网页日历上精准呈现换算后的本地时间槽位，且在夏令时切换当天时间不能发生偏差 1 小时的 Bug。
+| 测试层级 | 被测模块与用例范围 | 技术选型与执行环境 | 隔离机制与策略 |
+| :--- | :--- | :--- | :--- |
+| **Availability Math Unit** | 时区交集计算、缓冲时间（Buffer Time）叠加、槽位切分（Slot Splitting） | Vitest | 纯数学与时间戳纯函数计算，零外部依赖 |
+| **DST Boundary Tests** | 夏令时切换凌晨（如 2:00 -> 3:00 跃迁）前后的可用槽位与预约生成 | Vitest + Luxon / Day.js | 固定时间桩与特定时区虚拟环境 |
+| **Prisma Booking Integration** | 数据库并发锁定、防超卖（Double Booking）、悲观锁/排他约束 | Prisma + Test PostgreSQL | 独立测试数据库与事务自动重置 |
+| **Calendar Sync Mock Tests** | Google Calendar API 响应超时、Token 过期刷新、同步冲突解决 | MSW (Mock Service Worker) | 拦截所有外部 OAuth 与日历 API 请求 |
+| **Webhook Delivery Tests** | 预约成功事件派发、重试退避机制（Backoff）、签名验签 | Vitest + Supertest | 本地虚拟 HTTP 接收端验证签名 |
+| **Booking Funnel E2E** | 真实浏览器中完成选择日期 -> 选择时间 -> 填写表单 -> 收到日历卡片 | Playwright | 自动化清除测试用户日历日程 |
 
-#### 3.1.2 测试用例设计方案
-* **测试用例实现（Vitest 纯逻辑算法测试）**：
+---
+
+## 3. 全模块自动化用例设计与实现详解
+
+### 3.1 模块一：跨时区与多日程可用空闲时段（Availability Slots）交集计算测试
+
+#### 3.1.1 业务功能与测试目标
+发起人时区为 `America/New_York`，受访者时区为 `Asia/Shanghai`。发起人设置工作时间为工作日 09:00 - 17:00，且中间有 12:00 - 13:00 的日程占用。计算引擎必须输出：
+1. 自动转换为 UTC 时间进行区间并集/交集计算。
+2. 转换为受访者上海时区后，准确呈现对应的北京时间可选时段。
+3. 扣除 15 分钟前置与后置缓冲时间（Buffer Time）。
+
+#### 3.1.2 测试用例实现
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { getSchedule } from '@calcom/features/schedules/lib/getSchedule';
+import { getAvailableSlots } from '@calcom/core/getAvailableSlots';
+import { Dayjs } from 'dayjs';
 
-describe('Timezone & DST Slot Computation', () => {
-  it('correctly shifts slots across DST transition date for user in New York booking Tokyo host', async () => {
-    // 1. 发起人配置：时区为 Asia/Tokyo，周一上午 9:00 - 12:00
+describe('Availability Engine Timezone Intersection Suite', () => {
+  it('correctly intersects host availability and excludes busy slots across timezones', async () => {
+    // 1. 发起人日程配置：纽约时区，工作时间 09:00 - 17:00
     const hostSchedule = {
-      timeZone: 'Asia/Tokyo',
-      availability: [{ days: [1], startTime: '09:00', endTime: '12:00' }],
+      timeZone: 'America/New_York',
+      workingHours: [
+        { days: [1, 2, 3, 4, 5], startTime: 9 * 60, endTime: 17 * 60 } // 分钟表示
+      ],
+      busySlots: [
+        // 纽约时间 13:00 - 14:00 有现存会议占用
+        {
+          start: '2026-10-15T13:00:00-04:00',
+          end: '2026-10-15T14:00:00-04:00'
+        }
+      ]
     };
 
-    // 2. 模拟参会人在夏令时切换日（2026-03-08）查看可用槽位
-    const attendeeTimeZone = 'America/New_York';
-    const slots = await getSchedule({
-      dateFrom: '2026-03-08',
-      dateTo: '2026-03-09',
-      hostSchedule,
-      timeZone: attendeeTimeZone,
+    // 2. 访问者时区：亚洲/上海
+    const inviteeTimeZone = 'Asia/Shanghai';
+    const dateQuery = '2026-10-15'; // 纽约对应日
+
+    // 3. 计算 30 分钟长度的可用预约槽位
+    const slots = await getAvailableSlots({
+      schedule: hostSchedule,
+      eventLength: 30,
+      date: dateQuery,
+      targetTimeZone: inviteeTimeZone
     });
 
-    // 3. 东京 09:00 对应纽约前一天晚上 19:00 或 20:00（依据夏令时偏移精确计算）
-    expect(slots.length).toBeGreaterThan(0);
-    expect(slots[0].time).toBe('2026-03-08T19:00:00.000-05:00');
+    // 4. 断言返回的槽位中，绝对不包含对应纽约 13:00-14:00 (即北京时间次日凌晨 01:00-02:00) 的时间段
+    const busySlotBeijingIso = '2026-10-16T01:00:00+08:00';
+    const hasBusySlot = slots.some(slot => slot.time === busySlotBeijingIso);
+    expect(hasBusySlot).toBe(false);
 
-    // 4. 断言时间槽位时长严格为 30 分钟步长，无时间重叠
-    const firstSlotDuration = new Date(slots[0].endTime).getTime() - new Date(slots[0].time).getTime();
-    expect(firstSlotDuration).toBe(30 * 60 * 1000);
+    // 验证正常工作时间对应槽位存在且数量符合预期
+    expect(slots.length).toBeGreaterThan(10);
   });
 });
 ```
 
 ---
 
-### 3.2 功能二：并发防双重预订（Double Booking Prevention）
+### 3.2 模块二：夏令时（Daylight Saving Time）跳跃边界与容错测试
 
-#### 3.2.1 业务功能背景
-当两个参会人在同一秒内点击并提交同一个时间段（例如周二 14:00）的预约请求时，系统底层必须依赖数据库行级锁或乐观锁，确保一人预订成功，另一人立即收到已被占用的提示并引导重新选时间。
+#### 3.2.1 业务功能与测试目标
+在夏令时开始的当天（如欧美时间凌晨 02:00 直接跳到 03:00），系统不能生成不存在的 `02:30` 预约槽位；在冬令时结束当天（02:00 重复一次），不能生成重复冲突槽位。
 
-#### 3.2.2 测试用例设计方案
-* **测试用例实现（tRPC 路由并发压力集成测试）**：
+#### 3.2.2 测试用例实现
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { createCaller } from '@calcom/trpc/server/routers/_app';
+import { calculateDaylightSlots } from '@calcom/core/timezones';
 
-describe('Concurrency Control: Double Booking Guard', () => {
-  it('ensures only one booking succeeds when two requests hit the same slot concurrently', async () => {
-    const callerAlice = createCaller({ user: { id: 'user-alice' } });
-    const callerBob = createCaller({ user: { id: 'user-bob' } });
+describe('Daylight Saving Time Jump Suite', () => {
+  it('omits non-existent local hour during Spring Forward transition', () => {
+    // 模拟 2026 年美国夏令时跳跃日（春季跳跃）
+    const dstSunday = '2026-03-08';
+    const timeZone = 'America/New_York';
 
-    const targetSlot = '2026-04-15T10:00:00.000Z';
-    const bookingPayload = {
-      eventTypeId: 1,
-      start: targetSlot,
-      end: '2026-04-15T10:30:00.000Z',
-    };
+    const generatedSlots = calculateDaylightSlots({
+      date: dstSunday,
+      timeZone,
+      slotIntervalMinutes: 30
+    });
 
-    // 并发同时发起两笔预订请求（Promise.allSettled 模拟竞争）
-    const [resultAlice, resultBob] = await Promise.allSettled([
-      callerAlice.bookings.create(bookingPayload),
-      callerBob.bookings.create(bookingPayload),
-    ]);
+    // 02:00 - 02:59 在当地物理上被跳过，绝对不可预约
+    const hasInvalidHour = generatedSlots.some(slot => {
+      const localHour = new Date(slot).toLocaleTimeString('en-US', { timeZone, hour: '2-digit', hour12: false });
+      return localHour === '02';
+    });
 
-    // 统计成功与失败数量
-    const fulfilled = [resultAlice, resultBob].filter(r => r.status === 'fulfilled');
-    const rejected = [resultAlice, resultBob].filter(r => r.status === 'rejected');
-
-    // 严格断言：必须且仅有 1 笔成功，另 1 笔被安全拒绝并抛出已占用异常
-    expect(fulfilled).toHaveLength(1);
-    expect(rejected).toHaveLength(1);
-    
-    if (rejected[0].status === 'rejected') {
-      expect(rejected[0].reason.message).toContain('booking_conflict_time_already_taken');
-    }
+    expect(hasInvalidHour).toBe(false);
   });
 });
 ```
 
 ---
 
-### 3.3 功能三：Playwright 完整预约链路端到端断言
+### 3.3 模块三：并发高负载预约防超卖（Double Booking Prevention）数据库事务测试
 
-#### 3.3.1 业务功能背景
-用户访问公共个人预约页 `https://cal.com/john`，点击日期、点击时间槽、填写姓名邮箱并点击提交，页面应跳转至预约成功页面，并生成 `.ics` 日历附件下载链接。
+#### 3.3.1 业务功能与测试目标
+两个用户在同一秒对同一个空闲时段点击“确认预约”。数据库必须通过排他事务锁或唯一约束，保证只有一人成功创建 Booking，另一人必须收到 `409 Conflict` 友好提示，坚决杜绝超卖。
 
-#### 3.3.2 测试用例设计方案
-* **测试用例实现**：
+#### 3.3.2 测试用例实现
 ```typescript
-test('complete booking flow via web UI', async ({ page }) => {
-  await page.goto('/john/30min');
+import { describe, it, expect } from 'vitest';
+import { prisma } from '@calcom/prisma';
+import { createBooking } from '@calcom/features/bookings/lib/createBooking';
 
-  // 1. 点击日历网格中第一个可用的日期
-  const availableDay = page.locator('[data-testid="day"][data-disabled="false"]').first();
-  await availableDay.click();
+describe('Concurrency Double Booking Prevention Suite', () => {
+  it('prevents double booking for identical slot via database transaction lock', async () => {
+    const bookingSlot = {
+      userId: 1,
+      startTime: new Date('2026-11-01T10:00:00Z'),
+      endTime: new Date('2026-11-01T10:30:00Z'),
+      title: 'Product Consultation',
+    };
 
-  // 2. 选择可用的具体时间槽并进入表单
-  const slotButton = page.locator('[data-testid="time"]').first();
-  await slotButton.click();
+    // 模拟两个用户完全并行的发起预约
+    const results = await Promise.allSettled([
+      createBooking({ ...bookingSlot, attendeeEmail: 'user_a@example.com' }),
+      createBooking({ ...bookingSlot, attendeeEmail: 'user_b@example.com' }),
+    ]);
 
-  // 3. 填写参会人信息表单
-  await page.fill('input[name="name"]', 'Bob Smith');
-  await page.fill('input[name="email"]', 'bob@example.com');
-  await page.click('button[type="submit"]');
+    // 1. 验证结果分布：一个成功，一个被拒绝
+    const fulfilled = results.filter(r => r.status === 'fulfilled');
+    const rejected = results.filter(r => r.status === 'rejected');
 
-  // 4. 断言成功确认页面与事件详情
-  await expect(page.locator('[data-testid="booking-success"]')).toBeVisible();
-  await expect(page.locator('.booking-attendee-name')).toHaveText('Bob Smith');
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(1);
+
+    // 2. 验证数据库中物理记录严格仅有 1 条
+    const dbCount = await prisma.booking.count({
+      where: {
+        userId: 1,
+        startTime: bookingSlot.startTime,
+      },
+    });
+    expect(dbCount).toBe(1);
+  });
 });
 ```
 
 ---
 
-## 4. 自动化测试基础设施与 CI 质量保障
+### 3.4 模块四：Playwright 预约漏斗端到端全链路（E2E）测试
 
-1. **类型安全端到端链路（End-to-End Type Safety）**：
-   * 前端直接引用后端 tRPC 路由的类型定义，在运行测试前由 TypeScript 编译器静态拦截所有入参不匹配的请求。
-2. **Prisma 数据库事务回滚模式**：
-   * 在单元/集成测试中，每个用例运行在独立的 Prisma Transaction 中，用例结束立即 Rollback，省去繁琐的数据清理脚本，执行速度极快。
+#### 3.4.1 业务功能与测试目标
+测试最终消费者从受邀请页面完成预约的全流程：
+1. 访问用户公共预约链接 `http://localhost:3000/john/30min`。
+2. 日历中点击可选日期，右侧抽屉滑动展示可选时间。
+3. 选择 `10:00 AM`，输入姓名邮箱与备注，点击确认。
+4. 页面成功跳转到 `Booking Confirmed` 页面并输出 `.ics` 下载卡片。
+
+#### 3.4.2 测试用例实现
+```typescript
+import { test, expect } from '@playwright/test';
+
+test.describe('Cal.com Booking Funnel E2E', () => {
+  test('Complete public appointment booking flow from calendar to confirmation', async ({ page }) => {
+    await page.goto('http://localhost:3000/pro-demo/30min');
+
+    // 1. 等待日历组件挂载并点击下一个可用日期
+    const availableDate = page.locator('[data-testid="day"][data-disabled="false"]').first();
+    await expect(availableDate).toBeVisible({ timeout: 10000 });
+    await availableDate.click();
+
+    // 2. 选择具体的时钟槽位
+    const timeSlot = page.locator('[data-testid="time"]').first();
+    await expect(timeSlot).toBeVisible();
+    const selectedTimeText = await timeSlot.innerText();
+    await timeSlot.click();
+
+    // 3. 填写预约人表单
+    await page.fill('input[name="name"]', 'Alice Smith');
+    await page.fill('input[name="email"]', 'alice@company.com');
+    await page.fill('textarea[name="notes"]', 'Discuss partnership details');
+
+    // 4. 点击 Confirm 提交
+    await page.click('button[type="submit"]');
+
+    // 5. 验证跳转至预约成功页面
+    await expect(page.locator('[data-testid="success-page"]')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('body')).toContainText('This meeting is scheduled');
+    await expect(page.locator('body')).toContainText('Alice Smith');
+  });
+});
+```
 
 ---
 
-## 5. 对复杂 Web 系统的实战借鉴意义
+## 4. 测试工程化与基础设施
 
-* **时区与时间敏感系统必须脱离本地机器时间**：测试用例中所有涉及日历、工单、排班的时间，必须显式声明包含时区偏移量的 ISO 字符串，严禁依赖执行机器（CI Runner）的本地时区。
-* **高价值资产抢占必须编写真正的并发竞争测试**：对于预约、购票、抢单等存在“库存/时间槽唯一性”的系统，必须在集成测试中编写 `Promise.all` 并发压测，验证底层锁机制和错误码返回。
+1. **时区测试全局基准与环境隔离**：
+   * 在 Vitest 配置文件中，针对特定测试文件使用 `process.env.TZ = 'UTC'` 锁定基准，并在测试用例内部使用 `Intl.DateTimeFormat` 显式注入目标时区，避免受测试主机系统时区影响。
+2. **MSW (Mock Service Worker) 模拟第三方日历 API**：
+   * 将 Google Calendar、Outlook Graph API 的 OAuth 刷新与日程创建全部用 MSW 在网络层劫持，无需配置真实 Google 开发者账号即可进行完整故障注入（如测试 401 Token 失效自动刷新）。
+
+---
+
+## 5. 对同类复杂系统的参考价值
+
+* **时间维度系统的数学求交与极端边界**：所有涉及排班、抢票、会议预订的系统，最大的漏洞往往出在夏令时切换与时区换算。在单元测试中必须建立针对关键时间节点的边界测试集（如 2 月 29 日闰年、12 月 31 日跨年、夏令时跳跃），才能保障系统全年无差错运行。
+* **高并发核心资源的事务互斥**：对于不能超卖的核心资源，依赖应用层校验是不可靠的，必须在测试用例中引入真实的 `Promise.all` 并发压力测试，直接验证数据库层面的排他锁与唯一约束。
