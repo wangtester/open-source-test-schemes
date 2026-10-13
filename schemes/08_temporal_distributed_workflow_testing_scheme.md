@@ -1,161 +1,197 @@
-# Temporal 自动化测试方案与用例设计深度剖析
+# Temporal 自动化测试方案与分布式工作流用例全集深度剖析
 
-## 1. 项目背景与系统架构特征
+## 1. 项目背景与系统架构全景
 
-### 1.1 系统定位与技术栈
-[Temporal](https://github.com/temporalio/temporal) 是全球领先的开源分布式工作流编排与高可靠状态机平台（由 Uber Cadence 原班核心团队创立）。它允许开发者以普通代码形式编写具备强一致性、容灾持久化的长周期业务流程（可跨越数秒至数年）。
-
-### 1.2 被测系统核心组成
-1. **工作流定义（Workflow Definition）**：受限于“严格确定性（Determinism）”的状态机代码，负责编排控制流与定时器。
-2. **活动任务（Activities）**：执行非确定性外部 IO（发邮件、调第三方支付、写数据库）的有副作用组件。
-3. **事件历史引擎（Event Sourcing History Engine）**：基于事件溯源记录工作流的每一步状态演进。
-4. **Temporal Server & Worker**：包含匹配引擎（Matching Service）、历史服务（History Service）与客户端 Worker 进程。
-
-### 1.3 自动化测试的主要难点与挑战
-* **超长时间跨度测试的现实不可行性**：一个涉及“等待 30 天未操作则自动退款”的业务流，自动化测试不可能真正 sleep 30 天。
-* **确定性约束校验难题**：工作流代码稍有修改（如增加了一个分支或改变了日志打印），重放生产历史事件时就会发生 `NonDeterministicWorkflowError` 灾难。
-* **分布式网络抖动与 Worker 随机崩溃重放**：执行到一半的节点突发宕机，状态如何无损恢复。
-
----
-
-## 2. 测试架构全景与分层策略
-
-Temporal 官方为自动化测试量身定制了全套工业级测试框架（如 `TestWorkflowEnvironment`）：
+[Temporal](https://github.com/temporalio/temporal) 是全球最先进的企业级微服务持久化分布式工作流编排引擎。它采用**事件溯源（Event Sourcing）与虚拟内存重放（Virtual Memory Replay）**技术，使得开发者可以使用普通的高级编程语言（Go / TypeScript / Java / Python）编写任意长寿命的工作流（甚至持续运行数年），即使底层机器断电、Kubernetes Pod 重启，工作流代码的执行进度与局部变量也能被完全恢复。
 
 ```
-┌────────────────────────────────────────────────────────┐
-│            History Replay Regression Tests             │  确定性重放层：使用历史生产 JSON 检验新代码兼容性
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┐
-│      Time-Skipping Virtual Clock Workflow Tests        │  时空穿梭层：毫秒级快进数月时长，验证定时器与超时
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┐
-│         Mock Activities & Failure Injection            │  活动模拟层：模拟 Activity 失败、限流、网络超时重试
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┐
-│         Workflow Logic Deterministic Unit Tests        │  单元逻辑层：无网络依赖的状态机流转验证
-└────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Temporal Client SDK App                         │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ gRPC 双向流
+┌───────────────────────────────────▼────────────────────────────────────┐
+│                    Temporal Cluster Core (Go)                          │
+├───────────────────────────────┬────────────────────────────────────────┤
+│ Frontend Gateway Service      │ History Service & Event Engine         │
+│ - gRPC 限流与鉴权校验         │ - 状态机持久化事件流 (Events List)     │
+│ - 跨集群多租户路由转发       │ - 确定性执行重放 (Deterministic Replay) │
+├───────────────────────────────┼────────────────────────────────────────┤
+│ Matching Service              │ Timer & Internal Queue Manager         │
+│ - 任务队列 (TaskQueue) 分发   │ - 分布式定时器与延时触发调度           │
+│ - Worker 长轮询拉取匹配       │ - 信号 (Signal) 与查询 (Query) 协调器  │
+└───────────────────────────────┴────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. 核心功能及测试用例设计剖析
+## 2. 测试架构全景与测试分类矩阵
 
-### 3.1 功能一：基于虚拟时钟的时间跳跃（Time-Skipping）测试
+Temporal 为分布式系统测试树立了最高水准的自动化验证范式：
 
-#### 3.1.1 业务功能背景
-如何快速测试包含 `await sleep('30 days')` 或定时唤醒的工作流？
+| 测试层级 | 被测模块与用例范围 | 技术选型与执行环境 | 隔离机制与策略 |
+| :--- | :--- | :--- | :--- |
+| **Workflow Determinism Replay**| 校验代码逻辑变更是否破坏历史事件树兼容性 | Temporal SDK Replayer | 纯离线加载历史 JSON 事件流，无需集群 |
+| **TestWorkflowEnvironment** | 虚拟时钟快进、模拟几天后的定时器触发、Activity 故障注入 | SDK 测试套件（自带内嵌 Server） | 内存单进程虚拟集群，毫秒级模拟长时间流逝 |
+| **Activity Retry & Backoff** | 网络超时、异常抛出、指数退避间隔校验 | SDK Test Framework | 拦截 Activity 调用次数与时间戳 |
+| **Signals & Queries Tests** | 外部异步事件触发状态跃迁、只读查询返回当前内存变量 | SDK Test Framework | 驱动式断言（Step-by-step） |
+| **Dynamic Versioning Tests** | 使用 `workflow.GetVersion()` 升级工作流代码且不影响旧实例 | Replay Test Suite | 双版本历史记录交替执行对比 |
 
-#### 3.1.2 测试用例设计方案
-Temporal 测试环境提供了虚拟时钟管理器。当且仅当所有 Worker 处于空闲等待状态时，测试服务器会自动将时间指针“瞬间跃迁”到最近的定时器触发点。
-* **测试用例实现（TypeScript SDK 示例）**：
-```typescript
-import { TestWorkflowEnvironment } from '@temporalio/testing';
-import { Worker } from '@temporalio/worker';
+---
 
-test('workflow sleeps 30 days and triggers reminder in milliseconds', async () => {
-  // 1. 启动轻量级内存测试环境（内置 Time-skipping 能力）
-  const testEnv = await TestWorkflowEnvironment.createTimeSkipping();
+## 3. 全模块自动化用例设计与实现详解
 
-  const { client, nativeConnection } = testEnv;
-  const worker = await Worker.create({
-    connection: nativeConnection,
-    taskQueue: 'test-queue',
-    workflowsPath: require.resolve('./workflows'),
-  });
+### 3.1 模块一：Workflow 确定性执行检验与事件溯源重放（Replayer）测试
 
-  // 2. 在后台启动 Worker 并触发工作流
-  await worker.runUntil(async () => {
-    const handle = await client.workflow.start(subscriptionRenewalWorkflow, {
-      taskQueue: 'test-queue',
-      workflowId: 'test-sub-123',
-      args: [{ userId: 'U-001', renewalPeriodDays: 30 }],
-    });
+#### 3.1.1 业务功能与测试目标
+Temporal 工作流代码必须是**严格确定性（Deterministic）**的，禁止在工作流函数内部直接读取系统时间 `time.Now()`、生成随机数或发起原生 HTTP 请求。若开发者在迭代中不小心引入了破坏确定性的改动，历史工作流实例在重放时会发生 `Non-Deterministic Error`。测试必须拦截此类致命代码退化。
 
-    // 3. 时间在底层瞬间跃迁 30 天，无任何物理等待
-    const result = await handle.result();
-    
-    // 4. 断言工作流在模拟的 30 天后正常完成了续费扣款与邮件发送
-    expect(result.status).toBe('RENEWED');
-    expect(result.chargeCount).toBe(1);
-  });
+#### 3.1.2 测试用例实现（Go SDK 测试）
+```go
+package workflow_test
 
-  await testEnv.teardown();
-});
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/worker"
+)
+
+func TestWorkflow_ReplayHistoryWithoutNonDeterministicError(t *testing.T) {
+	// 1. 初始化重放器，注册当前最新版本的工作流代码
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflow(MyOrderFulfillmentWorkflow)
+
+	// 2. 加载生产环境中真实运行完成并归档的历史事件 JSON 文件 (包含数十个 Activity 交互历史)
+	historyJsonFile := "testdata/order_workflow_v1_history.json"
+
+	// 3. 执行重放断言：回放全部事件，验证决策树完全吻合
+	err := replayer.ReplayWorkflowHistoryFromJSONFile(nil, historyJsonFile)
+	require.NoError(t, err, "Workflow history replay failed! Detected non-deterministic change.")
+}
 ```
 
 ---
 
-### 3.2 功能二：历史事件确定性重放回归测试（Replay Test）
+### 3.2 模块二：虚拟时钟快进（Time Skipping）与定时器唤醒测试
 
-#### 3.2.1 业务功能背景
-在事件溯源架构中，如果开发者重构了工作流代码，导致新代码产生的事件序列与已经持久化在生产数据库中的历史事件序列不一致，正在运行中的工作流将会全部报错挂死。
+#### 3.2.1 业务功能与测试目标
+业务场景：用户注册后，系统等待 7 天（`workflow.Sleep(ctx, 7*24*time.Hour)`），若未完成首单则发送唤醒邮件。
+自动化测试不可能真正等待 7 天。测试环境必须能**自动将虚拟时钟跳跃 7 天**，瞬间唤醒定时器并断言后续行为。
 
-#### 3.2.2 测试用例设计方案
-* **设计原则**：将生产环境导出的历史 JSON 作为金样，在新代码上运行 `Worker.runReplayHistory`。
-* **测试用例实现**：
-```typescript
-import { Worker } from '@temporalio/worker';
-import historyJson from './fixtures/production_order_workflow_history.json';
+#### 3.2.2 测试用例实现（Go SDK 测试）
+```go
+package workflow_test
 
-test('refactored workflow must be backwards compatible with production history', async () => {
-  // 使用当前最新修改的工作流定义重放历史事件
-  await expect(
-    Worker.runReplayHistory(
-      {
-        workflowsPath: require.resolve('./refactored-workflows'),
-      },
-      historyJson
-    )
-  ).resolves.not.toThrow();
-  // 若新代码改动破坏了历史事件流的顺序，将直接抛出 NonDeterministicWorkflowError
-});
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/testsuite"
+)
+
+func TestWorkflow_Sleep7DaysWithTimeSkipping(t *testing.T) {
+	testSuite := &testsuite.WorkflowTestSuite{}
+	env := testSuite.NewTestWorkflowEnvironment()
+
+	// 1. Mock 唤醒邮件发送的 Activity
+	env.OnActivity("SendReminderEmail", mock.Anything, "user_123").Return(nil).Once()
+
+	// 2. 异步启动长达 7 天等待的工作流
+	env.ExecuteWorkflow(OnboardingWorkflow, "user_123")
+
+	// 3. 断言执行瞬间完成（虚拟时钟瞬间推进 7 天，物理执行耗时低于 100 毫秒）
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	env.AssertExpectations(t)
+}
 ```
 
 ---
 
-### 3.3 功能三：Activity 重试风暴与退避策略测试
+### 3.3 模块三：Activity 异常重试策略（RetryPolicy）与指数退避（Exponential Backoff）测试
 
-#### 3.3.1 业务功能背景
-当外部支付网关故障时，Activity 会根据重试策略（`RetryPolicy`）按指数退避重试（如 1s, 2s, 4s, 8s），直至达到最大尝试次数或特定不可重试异常。
+#### 3.3.1 业务功能与测试目标
+定义 Activity 重试策略：初始间隔 1 秒，Backoff 系数 2.0，最大尝试 4 次。测试必须验证：
+1. 连续失败时，每次重试的虚拟时钟间隔严格按照 1s -> 2s -> 4s 翻倍。
+2. 超过最大尝试次数后，精准向上层工作流抛出 `ActivityFailure`。
 
-#### 3.3.2 测试用例设计方案
-* **用例设计**：通过在测试夹具中 Mock Activity 的执行行为，模拟其前 4 次抛出网络异常，第 5 次成功恢复。
-* **断言设计**：
-  * 断言 Activity 实际被调用的总次数精确为 5。
-  * 断言重试间隔符合配置的指数退避参数。
-  * 断言工作流不会将临时性网络抖动作出业务失败处理，最终依然达成成功状态。
+#### 3.3.2 测试用例实现
+```go
+func TestActivity_ExponentialBackoffRetryPolicy(t *testing.T) {
+	testSuite := &testsuite.WorkflowTestSuite{}
+	env := testSuite.NewTestWorkflowEnvironment()
+
+	var attemptTimes []time.Time
+
+	// 模拟一个前 3 次均因网络中断抛错的 Activity
+	env.OnActivity("CallPaymentGateway", mock.Anything, mock.Anything).
+		Return(func(ctx context.Context, amount int) error {
+			attemptTimes = append(attemptTimes, env.Now())
+			return errors.New("network connection reset")
+		}).Times(3)
+
+	env.ExecuteWorkflow(PaymentWorkflow, 100)
+
+	require.Error(t, env.GetWorkflowError())
+	// 验证触发了 3 次调用
+	require.Len(t, attemptTimes, 3)
+
+	// 验证指数退避间隔递增
+	interval1 := attemptTimes[1].Sub(attemptTimes[0])
+	interval2 := attemptTimes[2].Sub(attemptTimes[1])
+	require.Equal(t, 1*time.Second, interval1)
+	require.Equal(t, 2*time.Second, interval2)
+}
+```
 
 ---
 
-### 3.4 功能四：Worker 随机崩溃注入与状态机自愈验证
+### 3.4 模块四：异步信号（Signal）通道交互与只读查询（Query）状态测试
 
-#### 3.4.1 业务功能背景
-工作流执行至中途（例如已扣款成功，正在等待第三方发货），Worker 物理机突发停电宕机。新启动的 Worker 能否保证绝不发生重复扣款？
+#### 3.4.1 业务功能与测试目标
+工作流运行在等待状态时，测试可以随时向工作流发送 Signal 改变其内部状态，并调用 Query 获取当前计算指标，而不需要将工作流提前终止。
 
-#### 3.4.2 测试用例设计方案
-* **测试实现步骤**：
-  1. 启动 Worker A，触发订单工作流。
-  2. 监听事件流，在检测到“扣款成功事件”写入后，立即对 Worker A 执行 `workerA.shutdown()`。
-  3. 启动全新的 Worker B 接管同一任务队列。
-  4. 断言 Worker B 自动从历史事件中恢复内存变量与调用堆栈，直接跳过已完成的扣款活动，继续执行发货流程。
+#### 3.4.2 测试用例实现
+```go
+func TestWorkflow_SignalAndQueryInteraction(t *testing.T) {
+	testSuite := &testsuite.WorkflowTestSuite{}
+	env := testSuite.NewTestWorkflowEnvironment()
+
+	// 注册执行延时工作流
+	env.RegisterDelayedCallback(func() {
+		// 1. 发起 Query：此时计数应为初始值 0
+		val, err := env.QueryWorkflow("getCurrentCount")
+		require.NoError(t, err)
+		var count int
+		val.Get(&count)
+		require.Equal(t, 0, count)
+
+		// 2. 发送异步 Signal：追加数值 42
+		env.SignalWorkflow("incrementSignal", 42)
+	}, 1*time.Minute)
+
+	env.ExecuteWorkflow(CounterWorkflow)
+
+	// 3. 校验最终完成结果接收到了 Signal
+	var finalResult int
+	env.GetWorkflowResult(&finalResult)
+	require.Equal(t, 42, finalResult)
+}
+```
 
 ---
 
-## 4. 自动化测试基础设施与 CI 质量保障
+## 4. 测试工程化与基础设施
 
-1. **Ephemeral In-Memory Test Server**：
-   * 测试环境使用官方编译的原生小型内存服务（`temporal-test-server`），启动只需 100ms，无需依赖 MySQL、PostgreSQL 或 Cassandra 外部集群。
-2. **多语言 SDK 规范一致性矩阵**：
-   * Temporal 官方 CI 对 Go、Java、TypeScript、Python 各 SDK 套件使用相同的协议金样测试用例，确保跨语言行为绝对对齐。
+1. **TestWorkflowEnvironment 纯内存沙箱**：
+   * Temporal 官方测试库提供完整的虚拟集群运行时，在单个测试进程中完成 Matching、History 和 Timer 的极速交互，没有任何 Docker 或外置数据库开销。
+2. **生产环境事件历史脱敏 Golden 库**：
+   * 在代码仓库维护典型复杂业务的历史 JSON 事件流，升级任何公共工作流代码时必须通过全量 Replay 扫描，杜绝线上发生非确定性锁死。
 
 ---
 
-## 5. 对复杂系统自动化测试设计的实战借鉴意义
+## 5. 对同类复杂系统的参考价值
 
-* **引入虚拟时钟解决异步长周期测试**：对于包含大量定时任务、超时审批、延迟队列的业务系统，自研或引入虚拟时钟加速机制是摆脱物理时间等待的唯一正道。
-* **事件溯源系统必须配置“历史重放兼容性门禁”**：任何以事件为基础的系统，在升级代码前必须用旧的事件序列跑回归，防止旧数据无法恢复。
-* **将节点崩溃恢复纳为基础集成用例**：分布式系统测试不应仅在平稳状态下运行，要在关键业务事务中间故意强杀节点，验证幂等性与恢复机制。
+* **虚拟时钟驱动长时间跨度自动化测试**：对于包含“延时重试、多天后提醒、跨月结账”的系统，切忌在代码中硬编码真实时间，通过将时间虚拟化，可在百毫秒内完成横跨数年的业务闭环断言。

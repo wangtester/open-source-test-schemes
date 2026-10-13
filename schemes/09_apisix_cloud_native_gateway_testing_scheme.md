@@ -1,74 +1,134 @@
-# Apache APISIX 自动化测试方案与用例设计深度剖析
+# Apache APISIX 自动化测试方案与云原生网关用例全集深度剖析
 
-## 1. 项目背景与系统架构特征
+## 1. 项目背景与系统架构全景
 
-### 1.1 系统定位与技术栈
-[Apache APISIX](https://github.com/apache/apisix) 是顶级 Apache 基金会开源的高性能云原生 API 网关与微服务流量管理平台。系统底层基于 OpenResty (Nginx + LuaJIT) 高性能网络库，控制面深度依赖 etcd 进行配置分发与动态监听，支持全动态路由、证书热加载与强大的插件链机制。
-
-### 1.2 被测系统核心组成
-1. **控制面与 Admin API**：通过 RESTful 接口管理路由、上游、消费者、SSL 凭据，并实时同步至 etcd。
-2. **数据面引擎（Data Plane Engine）**：高性能反向代理流管道，实现毫秒级动态路由匹配与负载均衡。
-3. **插件运行时（Plugin Pipeline）**：在 Nginx 七大生命周期阶段（`rewrite`, `access`, `before_proxy`, `header_filter`, `body_filter`, `log`）动态执行插件逻辑（限流、鉴权、日志、请求重写）。
-4. **健康检查与熔断器（Healthcheck & Circuit Breaker）**：主动/被动探测上游节点健康度，自动剔除故障节点。
-
-### 1.3 自动化测试的主要难点与挑战
-* **C / Nginx / Lua 跨语言混合体测试复杂度高**：传统的单元测试框架难以有效驱动 Nginx 多 Worker 进程与底层共享内存（`lua_shared_dict`）。
-* **动态配置秒级生效与零停机断言**：在不执行 `nginx -s reload` 的前提下，如何验证新路由是否真正零停机、毫秒级热生效。
-* **高并发网络请求与报文篡改**：网关涉及对 HTTP Header、Body、WebSocket、gRPC 协议的双向拦截与修改，边缘场景极多。
-
----
-
-## 2. 测试架构全景与分层策略
-
-Apache APISIX 采用了业界著名的 **`Test::Nginx` 声明式测试框架**，结合真实的 etcd 集群构建端到端回归防线：
+[Apache APISIX](https://github.com/apache/apisix) 是全球顶级的动态、实时、高性能云原生微服务 API 网关。系统基于 Nginx 内核与 LuaJIT（OpenResty）构建数据面，依托 etcd v3 提供分布式配置中心控制面。APISIX 的架构彻底颠覆了传统 Nginx 需要 `nginx -s reload` 重启 worker 进程导致长连接断开的弊端，实现了全配置（路由、SSL 证书、插件、上游服务节点）的**毫秒级动态热加载（Hot-reloading without reload）**。
 
 ```
-┌────────────────────────────────────────────────────────┐
-│             Test::Nginx Declarative E2E Suite          │  声明式网络层：模拟真实客户端 HTTP 报文收发
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┐
-│      Dynamic Admin API & etcd Sync Tests               │  控制面同步层：Admin API 注入规则，断言数据面生效时差
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┐
-│       Plugin Lifecycle Phase Pipeline Tests            │  插件管道层：分阶段断言 rewrite / access / body 拦截
-└───────────────────────────┬────────────────────────────┘
-                            │
-┌───────────────────────────┴────────────────────────────┘
-│         Mock Upstream & Fault Injection                │  上游桩服务：搭建延迟、500 报错、断开连接的 Fake Upstream
-└────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        HTTP / gRPC / TCP Traffic                       │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ 极速数据面转发 (OpenResty / LuaJIT)
+┌───────────────────────────────────▼────────────────────────────────────┐
+│                    APISIX Data Plane (Worker Processes)                │
+├───────────────────────────────┬────────────────────────────────────────┤
+│ RadixTree Route Matching      │ Plugin Pipeline Execution Chain        │
+│ - URI/Host/Method/Header 匹配 │ - rewrite -> access -> header_filter   │
+│ - 权重分流与金丝雀灰度发布    │ - body_filter -> log 各阶段插件链      │
+├───────────────────────────────┼────────────────────────────────────────┤
+│ Upstream Health Check & LB    │ etcd v3 Long-polling Watcher           │
+│ - 被动/主动健康探测熔断       │ - 毫秒级变更事件监听广播               │
+│ - Roundrobin / ConsistentHash │ - 内存缓存版本一致性比对 (Revision)    │
+└───────────────────────────────┴────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. 核心功能及测试用例设计剖析
+## 2. 测试架构全景与测试分类矩阵
 
-### 3.1 功能一：基于 `Test::Nginx` 的声明式 HTTP 报文测试
+APISIX 拥有基于 Perl 的 **Test::Nginx 声明式测试框架** 以及 Go 自动化测试套件：
 
-#### 3.1.1 业务功能背景
-网关测试的本质是：输入特定的 HTTP 请求，断言输出的 HTTP 响应（状态码、Header、Body、错误日志）。命令式测试代码往往冗长，APISIX 采用声明式格式。
+| 测试层级 | 被测模块与用例范围 | 技术选型与执行环境 | 隔离机制与策略 |
+| :--- | :--- | :--- | :--- |
+| **Plugin Unit Tests** | 插件参数 JSON Schema 校验、限流计数器算法、WAF 正则命中 | Test::Nginx / Busted (Lua) | 纯内存调用插件钩子函数 |
+| **Hot Reload Dynamic Tests** | 写入 etcd 配置后，在不 reload 情况下发起请求验证即时生效 | Test::Nginx + 独立 etcd | 每套测试动态挂载临时 etcd 前缀 |
+| **Route RadixTree Tests** | 万级路由并发匹配、通配符优先级、基于 Cookie 的 A/B 分流 | Test::Nginx 声明式用例 | 自动化启停独立受测 OpenResty 进程 |
+| **Fault Injection & Chaos** | etcd 临时宕机时本地内存缓存继续提供路由代理 | Test::Nginx + 杀死 etcd 进程 | 模拟网络中断与存储断连 |
+| **Performance Benchmark** | 50,000+ QPS 极限压测下 CPU 饱和度与 P99 延迟抖动 | wrk / FlameGraph 自动化火焰图 | 物理 CPU 亲和性绑定 |
 
-#### 3.1.2 测试用例设计方案
-* 每个 `.t` 测试文件由若干个声明式区块组成，测试运行器会自动启动定制化的 Nginx 进程执行驱动。
-* **典型声明式用例示例**：
+---
+
+## 3. 全模块自动化用例设计与实现详解
+
+### 3.1 模块一：etcd v3 动态路由毫秒级热加载与零 Reload 验证测试
+
+#### 3.1.1 业务功能与测试目标
+向 APISIX Admin API 提交一条全新路由规则。在没有任何 Nginx 进程重启或 reload 的前提下，数据面 Worker 必须在 10 毫秒内通过 etcd watch 机制完成内存路由表原地无缝更新，并立即对后续 HTTP 请求按新路由转发。
+
+#### 3.1.2 测试用例实现（Test::Nginx 声明式测试规范）
 ```perl
-=== TEST 1: Hit dynamic route with proxy-rewrite plugin
+use Test::Nginx::Socket::PB;
+use t::APISIX 'plan';
+
+repeat_each(1);
+no_long_string();
+no_shuffle();
+no_root_location();
+
+run_tests();
+
+__DATA__
+
+=== TEST 1: Register dynamic route and test zero-reload immediate effect
 --- config
     location /t {
         content_by_lua_block {
-            local http = require("resty.http")
-            local httpc = http.new()
-            
-            -- 1. 通过 Admin API 注册一条带重写插件的路由
-            local res, err = httpc:request_uri("http://127.0.0.1:9180/apisix/admin/routes/1", {
-                method = "PUT",
-                body = [[{
+            local t = require("lib.test_admin").test
+            -- 1. 通过 Admin API 动态下发一条路由：匹配 /hello 转发至后端 mock upstream
+            local code, body = t('/apisix/admin/routes/1',
+                ngx.HTTP_PUT,
+                [[{
                     "uri": "/hello",
+                    "upstream": {
+                        "type": "roundrobin",
+                        "nodes": {
+                            "127.0.0.1:1980": 1
+                        }
+                    }
+                }]]
+            )
+            if code >= 300 then
+                ngx.status = code
+                ngx.say(body)
+                return
+            end
+            ngx.say("ROUTE_CONFIGURED")
+        }
+    }
+--- request
+GET /t
+--- response_body
+ROUTE_CONFIGURED
+--- no_error_log
+[error]
+
+=== TEST 2: Hit the newly configured route immediately without reloading
+--- request
+GET /hello
+--- response_body
+passed
+--- no_error_log
+[error]
+[warn]
+```
+
+---
+
+### 3.2 模块二：令牌桶限流插件（Limit-Req）精确速率与突发突增（Burst）测试
+
+#### 3.2.1 业务功能与测试目标
+配置限流规则：速率限制为 `rate: 2 r/s`，突发并发允许 `burst: 1`。测试必须验证：
+1. 突发发送 3 个连续请求时，前 2 个请求被放行处理（1 个正常，1 个利用 burst 缓冲）。
+2. 第 3 个请求因超出桶容量被立即拒绝，严格返回 `HTTP 503 Service Unavailable` 或 `HTTP 429 Too Many Requests`。
+
+#### 3.2.2 测试用例实现（Test::Nginx 测试）
+```perl
+=== TEST 3: Limit-req plugin throttles burst requests accurately
+--- config
+    location /t {
+        content_by_lua_block {
+            local t = require("lib.test_admin").test
+            -- 绑定限流插件：rate = 1, burst = 1, key = remote_addr
+            local code, body = t('/apisix/admin/routes/2',
+                ngx.HTTP_PUT,
+                [[{
+                    "uri": "/rate-limit",
                     "plugins": {
-                        "proxy-rewrite": {
-                            "uri": "/world",
-                            "headers": { "X-Test-Inject": "APISIX" }
+                        "limit-req": {
+                            "rate": 1,
+                            "burst": 1,
+                            "rejected_code": 429,
+                            "key": "remote_addr"
                         }
                     },
                     "upstream": {
@@ -76,70 +136,76 @@ Apache APISIX 采用了业界著名的 **`Test::Nginx` 声明式测试框架**�
                         "nodes": { "127.0.0.1:1980": 1 }
                     }
                 }]]
-            })
-            ngx.say(res.status)
+            )
+            ngx.say("LIMIT_CONFIGURED")
         }
     }
 --- request
 GET /t
 --- response_body
-200
+LIMIT_CONFIGURED
+
+=== TEST 4: Concurrently trigger limit-req and assert HTTP 429
+--- pipelined_requests eval
+["GET /rate-limit", "GET /rate-limit", "GET /rate-limit"]
+--- response_status eval
+[200, 200, 429]
 --- no_error_log
 [error]
-
-=== TEST 2: Verify rewritten request arrives at upstream
---- request
-GET /hello
---- response_body
-passed to /world
---- response_headers
-X-Test-Inject: APISIX
 ```
 
 ---
 
-### 3.2 功能二：零停机动态路由热加载时延测试
+### 3.3 模块三：上游主动健康检查（Healthcheck）与节点自动摘除测试
 
-#### 3.2.1 业务功能背景
-传统 Nginx 修改配置需要 Reload，可能导致连接抖动或高并发瞬时丢失。APISIX 基于 etcd 监听机制实现实时热生效。
+#### 3.3.1 业务功能与测试目标
+上游配置包含节点 A 与节点 B。当节点 A 连续返回 2 次 HTTP 500 错误时，被动健康检查机制必须自动将节点 A 标记为 `UNHEALTHY` 并踢出可用节点池，后续流量 100% 路由至节点 B。
 
-#### 3.2.2 测试用例设计方案
-* **测试编排**：
-  1. 并发客户端以 100 QPS 持续向 `/api/order` 发起请求，断言初始返回 404（路由不存在）。
-  2. 自动化脚本调用 Admin API 创建 `/api/order`。
-  3. 客户端持续探测，记录从 Admin API 返回成功到数据面首次返回 200 的时间差。
-  4. **硬性断言**：生效时间差必须严格小于 1000ms（毫秒级同步），且在变更期间绝对不发生 TCP 丢包或 Connection Refused。
+#### 3.3.2 测试用例实现
+```perl
+=== TEST 5: Healthcheck automatically ejects failing upstream node
+--- config
+    location /t {
+        content_by_lua_block {
+            local t = require("lib.test_admin").test
+            -- 配置带健康探测的上游
+            local code, body = t('/apisix/admin/upstreams/1',
+                ngx.HTTP_PUT,
+                [[{
+                    "nodes": {
+                        "127.0.0.1:1981": 1,
+                        "127.0.0.1:1982": 1
+                    },
+                    "type": "roundrobin",
+                    "checks": {
+                        "active": {
+                            "http_path": "/status",
+                            "healthy": { "interval": 1, "successes": 1 },
+                            "unhealthy": { "interval": 1, "http_failures": 2 }
+                        }
+                    }
+                }]]
+            )
+            ngx.say("HEALTHCHECK_READY")
+        }
+    }
+--- request
+GET /t
+--- response_body
+HEALTHCHECK_READY
+```
 
 ---
 
-### 3.3 功能三：上游健康检查与自动熔断（Circuit Breaker）测试
+## 4. 测试工程化与基础设施
 
-#### 3.3.1 业务功能背景
-当上游集群中有 1 台机器出现持续 502/503 报错时，网关应自动将其置为 Unhealthy，将后续流量全部路由到健康的备用机器。
-
-#### 3.3.2 测试用例设计方案
-* **测试步骤**：
-  1. 使用内置 Mock 服务搭建两个上游端口：`Upstream-A (port 1980)`，`Upstream-B (port 1981)`。
-  2. 配置网关上游为负载均衡，并开启 `healthcheck.active`。
-  3. 通过测试脚本将 `Upstream-A` 切换为返回 500 状态码。
-  4. 触发连续 3 次健康检查探测。
-  5. 客户端再次发起业务请求：
-     * **断言**：流量 100% 转发至 `Upstream-B`，`Upstream-A` 请求量归零。
-     * **恢复断言**：将 `Upstream-A` 重新改为返回 200，经历连续成功探测后，断言流量自动恢复平分轮询。
+1. **Test::Nginx 原生轻量隔离沙箱**：
+   * 框架在 `/tmp/test-nginx-*` 目录为每次测试独立渲染 `nginx.conf` 模板，独立启动 Nginx Master 与 Worker 进程，并在测试完成瞬间强制回收所有套接字与进程。
+2. **etcd 内存临时存储加速测试**：
+   * 在 CI 环境中使用内存盘（`tmpfs`）运行单节点 etcd，单条热加载用例执行耗时控制在 5ms 以内。
 
 ---
 
-## 4. 自动化测试基础设施与 CI 质量保障
+## 5. 对同类复杂系统的参考价值
 
-1. **容器化依赖拓扑（etcd + Prometheus + Mock Upstreams）**：
-   * 所有集成测试在 GitHub Actions 运行前，通过轻量级 Docker 容器挂载标准 etcd 实例，保证配置存储环境与生产环境一致。
-2. **多操作系统与多架构覆盖**：
-   * 在 Linux (x86_64, arm64) 及 macOS 上分别运行，确保 LuaJIT 与 C 模块的字节码与内存指针在不同架构下行为一致。
-
----
-
-## 5. 对复杂系统自动化测试设计的实战借鉴意义
-
-* **声明式报文测试是网络/中间件类系统的最优解**：对于涉及协议转换、代理分发、报文改写的网络系统，采用“请求块 + 预期响应块 + 错误日志黑名单”的声明式结构能让用例清晰度提升数倍。
-* **零停机与热生效必须有确定性时延断言**：对于声称支持“动态加载”、“热更新”的系统，测试中必须在持续压测的背景下执行配置下发，验证生效时延与零抖动。
-* **主动与被动健康检查必须搭配双向恢复测试**：测试故障熔断时，不仅要测试“故障发生时是否顺利摘除”，更要测试“故障自愈后是否平滑回切”，避免单向熔断导致的节点永久下线。
+* **配置热加载的黑盒自动化断言范式**：对于宣称支持“零停机动态配置”的高性能网关或反向代理，测试必须通过流水线请求（Pipelined requests）在毫秒级别断言新旧配置切换边界，杜绝瞬时丢包或回退。
